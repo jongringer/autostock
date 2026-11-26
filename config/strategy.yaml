@@ -1,0 +1,67 @@
+# ============================================================================
+# ALPHA SHIELD v3.2 (6-1-F) — 전략 파라미터
+# 수치는 2026-11-27 확정 스펙(미국장 자동매매 전략 스펙 — ALPHA SHIELD v3.2) 그대로입니다.
+# 숫자를 바꾸면 백테스트 기준값(수익률 +48.68%, MDD -10.18%, 샤프 2.05)이 무효가 됩니다.
+# ============================================================================
+
+universe:
+  # 알파 가중치 (슬롯 경쟁 점수 = 알파 가중치 x (|낙폭| / |진입 임계|))
+  NVDA: 1.5
+  TSLA: 1.4
+  AMZN: 1.2
+  TSM: 1.1
+  AVGO: 1.0
+  QQQ: 1.0
+  AAPL: 0.9
+  GOOGL: 0.9
+
+capital:
+  slots: 2                       # 항상 2슬롯 고정 (자산 규모와 무관)
+  threshold_usd: 500.00          # 이 금액 미만/이상으로 1회 진입 금액이 갈린다
+  small_entry_usd: 85.00         # 자산 < $500
+  small_symbol_cap_usd: 170.00   # 1차 + 물타기 1회 합계 상한
+  large_entry_usd: 120.00        # 자산 >= $500
+  large_symbol_cap_usd: 240.00
+  cash_buffer_pct: 0.15          # 현금 안전 버퍼 = max(자산 x 15%, $55)
+  cash_buffer_min_usd: 55.00
+  min_order_usd: 10.00           # $10 미만 주문 금지
+
+entry:
+  atr_period: 20
+  atr_drawdown_multiple: 0.52    # 장중 고점 대비 -0.52 x ATR(20)% 이상 눌림
+  rsi_period: 2
+  rsi_max: 15                    # RSI(2) <= 15
+  chase_rsi_block: 70            # RSI(2) >= 70 이면 추격 매수 차단
+  sma_period: 200
+  sma_floor_ratio: 0.80          # 주가 >= SMA200 x 0.80
+  # ATR 결측 시 종목별 고정 낙폭 임계(%)
+  atr_fallback_pct:
+    QQQ: 0.7
+    AAPL: 1.0
+    GOOGL: 1.0
+    AMZN: 1.3
+    __default__: 1.5
+  signal_ttl_seconds: 900        # BUY 신호 15분 만료
+  signal_redelivery_rsi_max: 25  # 재전달 전 최신 RSI(2) > 25 이면 폐기 (fail-closed)
+  hod_outlier_filter: true       # 1분봉 이상 체결 필터로 장중 고점 산출
+
+add:
+  trigger_pct: 1.5               # 평단 대비 -1.5% 이상 추가 하락
+  rsi_max: 35                    # RSI(2) <= 35
+  max_adds: 1                    # 종목당 물타기 최대 1회
+
+exit:
+  stop_loss_pct: 5.0             # 단일 진입 -5.0%
+  stop_loss_added_pct: 3.5       # 물타기 포지션 -3.5%
+  take_profit_vix_low: 18.0      # 진입 시 확정 VIX 종가 < 18.0
+  take_profit_low_vix_pct: 8.0   #  -> +8.0%
+  take_profit_high_vix_pct: 5.0  # VIX >= 18.0 또는 미확인 -> +5.0%
+  time_exit_trading_days: 10     # 최초 진입일 기준 10거래일
+  time_exit_calendar_days: 14    # 또는 달력 14일
+  cooldown_seconds: 900          # 청산 후 재진입 15분 쿨다운 (손절 24시간 차단은 폐지됨)
+  force_exit_buffer_min: 15      # 마감 15분 전부터 신규 매수 금지 (청산은 계속)
+
+paper:
+  starting_cash_usd: 380.00
+  slippage_bps: 5                # 시장가 체결 가정 슬리피지 0.05%
+  commission_bps: 10             # 미국 주식 수수료 0.10% (왕복 0.2%)

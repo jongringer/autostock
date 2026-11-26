@@ -1,0 +1,25 @@
+[Unit]
+Description=ALPHA SHIELD v3.2 (Toss Securities US fractional auto-trader)
+Documentation=file:///opt/autostock/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 실행 계정과 경로를 서버에 맞게 수정하세요.
+User=trader
+Group=trader
+WorkingDirectory=/opt/autostock
+EnvironmentFile=/opt/autostock/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/autostock/.venv/bin/python -m alpha_shield --mode live --loop --interval 300
+Restart=always
+RestartSec=15
+# 실수로 ARMED 를 지우고 재기동해도 실주문이 나가지 않도록, 기동 전 상태를 확인하세요.
+# KillSwitch: state/halt.flag 가 있으면 신규 매수만 멈춥니다.
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

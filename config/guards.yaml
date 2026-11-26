@@ -1,0 +1,88 @@
+# ============================================================================
+# ALPHA SHIELD v3.2 — 5중 다중 방어막 파라미터
+# 원칙: 매수는 fail-Closed (확인 불가면 멈춤), 매도는 fail-Open (항상 작동).
+# ============================================================================
+
+market:
+  nq_symbol: "NQ=F"              # 나스닥100 선물 (Yahoo)
+  nq_block_pct: 1.5              # NQ -1.5% 이하 -> 신규 매수 전면 차단
+  vix_symbol: "^VIX"             # VIX (Yahoo, 일봉 종가)
+  vix_block: 30.0                # VIX >= 30 -> 신규 매수 전면 차단
+  fail_closed: true              # NQ/VIX 확인 불가 -> 매수 차단
+
+session:
+  entry_open_delay_min: 15       # 개장 초 15분 (09:30~09:45 ET) 유예
+  entry_close_buffer_min: 15     # 마감 전 15분 (정규 14:45~15:00, 조기 12:45~13:00 ET) 유예
+  fractional_close_buffer_min: 60 # 소수점 주문 마감 = 정규장 종료 1시간 전 (15:00 ET)
+
+events:
+  earnings_block_before_days: 1  # 실적 D-1 ~ 당일 차단
+  earnings_fail_closed: true     # 실적 캘린더 확인 불가 -> 매수 차단
+  earnings_cache_seconds: 43200  # 12시간
+
+filings:
+  lookback_days: 3
+  fail_closed: false              # SEC 조회 실패는 종목별 보류가 아니라 '판단 불가' -> 매수 차단(아래 true)
+  block_on_error: true
+  # 8-K 에서 구조적 악재로 보는 키워드 (소문자 부분일치)
+  block_keywords:
+    - "bankruptcy"
+    - "chapter 11"
+    - "chapter 7"
+    - "going concern"
+    - "substantial doubt"
+    - "delisting"
+    - "restatement"
+    - "material weakness"
+    - "sec investigation"
+    - "subpoena"
+    - "fraud"
+    - "resignation of"
+    - "ceo resign"
+    - "cfo resign"
+  sec_user_agent: "alpha-shield/3.2 (연락처는 .env 의 SEC_USER_AGENT 로 설정)"
+  cik:
+    NVDA: "1045810"
+    TSLA: "1318605"
+    AMZN: "1018724"
+    TSM: "1046179"
+    AVGO: "1730168"
+    AAPL: "320193"
+    GOOGL: "1652044"
+    # QQQ 는 Invesco QQQ Trust(ETF) — 8-K 구조적 악재 가드 대상이 아니므로 비워 둔다.
+
+news:
+  enabled: true
+  fail_closed: true              # 헤드라인 조회 실패 -> 매수 차단
+  lookback_items: 20
+  feed_url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
+  block_keywords:
+    - "bankruptcy"
+    - "chapter 11"
+    - "going concern"
+    - "halted"
+    - "trading halt"
+    - "fraud"
+    - "probe"
+    - "investigation"
+    - "delisting"
+    - "guidance cut"
+    - "cuts forecast"
+    - "recall"
+    - "class action"
+
+macro:
+  calendar_file: "config/macro_calendar_2026.json"
+  drawdown_boost_pct: 0.5        # FOMC/CPI/NFP 당일 요구 낙폭 -0.5%p 강화
+  fail_closed: true              # 캘린더 파일을 못 읽으면 매수 차단
+
+data:
+  max_quote_age_seconds: 900     # 시세 15분 이상 지연/결측 -> 매수 보류
+  max_daily_bar_age_days: 5      # 일봉이 이보다 오래되면 지표 불신
+  require_sma200: true
+
+risk:
+  daily_loss_limit_pct: 5.0      # 당일 자산 -5% -> 그날 신규 매수 정지
+  max_orders_per_minute: 6       # 어뷰징 방지
+  duplicate_order_window_seconds: 60
+  reconcile_qty_tolerance: 0.000001

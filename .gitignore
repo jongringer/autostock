@@ -1,0 +1,41 @@
+# ---- secrets / runtime state (절대 커밋 금지) ----
+.env
+.env.*
+!.env.example
+/state/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+toss_token.json
+*.key
+*.pem
+
+# ---- generated data (프로젝트 루트 한정) ----
+/logs/
+/ledger/
+/reports/
+*.log
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# ---- editor / os ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
