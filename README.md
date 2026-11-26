@@ -81,7 +81,7 @@ src/alpha_shield/
     reconcile.py            브로커 ↔ 로컬 원장 대조
     alerts.py               JSONL 알림 + 판정 로그
   reporting/ledger.py       세무용 거래 원장 CSV
-tests/                      183개 unittest (전략·가드·영속화·이중잠금·모의 브로커·live 스택)
+tests/                      184개 unittest (전략·가드·영속화·이중잠금·모의 브로커·live 스택)
 deploy/                     systemd 유닛 · watchdog · healthcheck
 docs/                       전략 스펙 · 운영 런북
 ```
@@ -181,7 +181,7 @@ PYTHONPATH=src:tests python3 -m unittest discover -s tests -p "test_*.py" -v
 pip install pytest && PYTHONPATH=src pytest -q tests
 ```
 
-**183개 테스트 / 전부 PASS** (2026-11-27 기준). 범위:
+**184개 테스트 / 전부 PASS** (2026-11-27 기준). 범위:
 
 - 지표: Wilder ATR/RSI 고정값, SMA, HOD 이상치 필터
 - 자금: $499.99/$500.00/$500.01 경계, 버퍼 교차점, 최소주문, 종목 상한

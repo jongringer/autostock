@@ -135,7 +135,8 @@ class Engine:
                 {"date": today.isoformat(), "ok": False, "mismatches": [f"account-error: {exc}"]},
             )
             return
-        self._reconcile(account, today, now)
+        # 기동 시에는 같은 날짜에 이미 대조했더라도 다시 본다 (재시작 후 잔고가 달라졌을 수 있음)
+        self._reconcile(account, today, now, force=True)
 
     def run_forever(self, interval_seconds: int = 300, max_cycles: int | None = None) -> None:
         completed = 0
@@ -777,9 +778,9 @@ class Engine:
         self.repo.kv_set("order_seq", str(sequence))
         return f"as-{today.strftime('%Y%m%d')}-{symbol}-{purpose}{sequence:03d}"
 
-    def _reconcile(self, account: AccountState, today: date, now: datetime) -> None:
+    def _reconcile(self, account: AccountState, today: date, now: datetime, force: bool = False) -> None:
         state = self.repo.kv_get_json("reconcile_state")
-        if isinstance(state, dict) and state.get("date") == today.isoformat():
+        if not force and isinstance(state, dict) and state.get("date") == today.isoformat():
             return
         result = reconcile(
             self.repo.positions(), account.positions, self.guards_config.risk.reconcile_qty_tolerance

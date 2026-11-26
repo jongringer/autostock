@@ -282,6 +282,17 @@ class EnginePaperTests(unittest.TestCase):
         state = self.h.repo.kv_get_json("reconcile_state")
         self.assertFalse(state["ok"])
 
+    def test_bootstrap_reconciles_even_after_same_day_state(self):
+        # 같은 날짜에 이미 '일치'로 기록되어 있어도 재시작(bootstrap)은 다시 대조한다
+        self.h.repo.kv_set_json("reconcile_state", {"date": self.h.now.date().isoformat(), "ok": True})
+        self.h.repo.save_position(
+            Position("AAPL", d("0.5"), d("100"), et(2026, 12, 1, 10), date(2026, 12, 1), d("8"))
+        )
+        self.h.engine.bootstrap()
+        state = self.h.repo.kv_get_json("reconcile_state")
+        self.assertFalse(state["ok"])
+        self.assertIn("AAPL", state["mismatches"][0])
+
     def test_daily_loss_limit_blocks_buys(self):
         self.h.repo.ensure_day_state(self.h.now.date(), d("400"), self.h.now)
         report = self.h.cycle()
