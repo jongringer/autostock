@@ -794,6 +794,7 @@ function renderUniverse(){
         '<div><span>SMA200</span><b class="sma"></b></div>'+
         '<div><span>슬롯 점수</span><b class="score"></b></div>'+
         '<div><span>장중 고점</span><b class="hod"></b></div>'+
+        '<div><span>익절 목표</span><b class="tpv"></b></div>'+
       '</div><div class="minibar"><i></i></div>'+
       '<div class="state"></div>'+
       '<div class="acts"><button class="buy">모의매수</button><button class="ghost detail">상세</button></div>';
@@ -808,6 +809,9 @@ function renderUniverse(){
     card.querySelector(".sma").textContent = d.sma200!==null ? usd(d.sma200) : "–";
     card.querySelector(".score").textContent = d.score!==null ? d.score.toFixed(3) : "–";
     card.querySelector(".hod").textContent = (d.hod!==null?usd(d.hod):"–");
+    const vixNow = MKT.quotes["^VIX"] ? MKT.quotes["^VIX"].px : null;
+    const tpTarget = (vixNow!==null && Number(vixNow) < OPTS.exit.vixLow) ? OPTS.exit.tpLow : OPTS.exit.tpHigh;
+    card.querySelector(".tpv").textContent = "+"+tpTarget.toFixed(1)+"%" + (vixNow===null?"":(Number(vixNow)<OPTS.exit.vixLow?" (VIX<18)":""));
     card.querySelector(".minibar i").style.width = Math.max(0, Math.min(100, (d.score||0)*33)) + "%";
     card.querySelector(".state").textContent = st.label;
     card.querySelector(".state").className = "state " + (pos?"flat":(d.ready?"up":"flat"));

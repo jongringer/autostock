@@ -880,9 +880,16 @@ class WebApp:
             state = f"일부 시세 실패 {len(snapshot.errors)}건"
         else:
             state = "시세 정상"
+        vix = snapshot.vix
+        if vix is None:
+            tp_note = "VIX 미확인 → 진입 시 목표 익절 +5.0%(보수적)"
+        else:
+            target = self.strategy.exit.take_profit_low_vix_pct if vix < self.strategy.exit.take_profit_vix_low else self.strategy.exit.take_profit_high_vix_pct
+            cutoff = self.strategy.exit.take_profit_vix_low
+            tp_note = f"현재 VIX {_num(vix, 2)} → 신규 진입 목표 익절 +{_num(target, 1)}% (VIX<{_num(cutoff, 1)} 이면 +{_num(self.strategy.exit.take_profit_low_vix_pct, 1)}%)"
         return (
             f"기준 {stamp} KST · {state} · ATR(20)/RSI(2)/SMA(200)은 일봉 종가, HOD는 1분봉(중앙값×1.15 이상치 제거) "
-            f"· 점수 = 알파 가중치 × (|낙폭| ÷ 진입 임계)"
+            f"· 점수 = 알파 가중치 × (|낙폭| ÷ 진입 임계) · {tp_note}"
         )
 
     def _position_view(self, position: Position, snapshot: MarketSnapshot, today: date) -> dict[str, Any]:
