@@ -33,10 +33,11 @@ from .calendar import SessionGuard, StaticUsCalendar
 from .clock import ET, et_date, now_et, to_kst
 from .config import ConfigError, GuardsConfig, Settings, StrategyConfig
 from .indicators import atr_pct, robust_intraday_high, sma, wilder_rsi
+from .guards.account import AccountRegulationGuard
 from .marketdata.macro import MacroCalendarError, load_macro_calendar
 from .models import Bar, CycleReport, Position, Quote
 from .numeric import ZERO, dec, pct4
-from .safety import HaltSwitch, LiveOrdersDisabled, SafetyLock
+from .safety import AccountKillSwitch, HaltSwitch, LiveOrdersDisabled, SafetyLock
 from .state.repo import Repo
 from .strategy.entry import SymbolInputs, entry_threshold_pct, evaluate_entry
 from .strategy.exit import hold_days, stop_loss_pct
@@ -50,7 +51,8 @@ STATUS_REASONS = {
     "no-dip": "눌림 부족",
     "rsi-too-high": "RSI(2) 높음",
     "chase-block": "추격 차단(RSI≥70)",
-    "below-sma-floor": "SMA200×0.80 미달",
+    "below-sma-floor": "SMA200×0.95 미달",
+    "abnormal-crash": "비정상 급락(당일 매수 제외)",
     "rsi-unavailable": "RSI 결측",
     "sma200-unavailable": "SMA200 결측",
     "hod-unavailable": "장중고점 결측",
@@ -545,7 +547,7 @@ class WebApp:
                 ZERO,
             )
             session = self.session_guard.evaluate(now)
-            guards_view = self._guards_view(snapshot, session, today)
+            guards_view = self._guards_view(snapshot, session, today, repo, equity)
             universe = self._universe_view(snapshot, now, positions, today)
             return {
                 "ok": True,
@@ -576,11 +578,13 @@ class WebApp:
                     "tier": {"entry_usd": _money(tier_entry), "cap_usd": _money(tier_cap)},
                 },
                 "safety": self._safety_view(repo),
+                "kill_switch": self._kill_switch_view(repo),
+                "account_rules": self._account_rules_view(repo, today, equity),
                 "session": self._session_view(session, now),
                 "guards": guards_view,
                 "universe": universe,
                 "universe_note": self._universe_note(snapshot, now),
-                "positions": [self._position_view(position, snapshot, today) for position in positions],
+                "positions": [self._position_view(position, snapshot, today, repo) for position in positions],
                 "orders": self._orders_view(repo),
                 "alerts": self._alerts_view(),
             }
@@ -655,6 +659,43 @@ class WebApp:
                 "ok": reconcile.get("ok", None),
                 "mismatches": list(reconcile.get("mismatches") or [])[:6],
             },
+            "account_kill_switch": self._kill_switch_view(repo),
+        }
+
+    def _kill_switch_view(self, repo: Repo) -> dict[str, Any]:
+        view = AccountKillSwitch(repo, self.guards.kill_switch).describe()
+        return {
+            "active": view["active"],
+            "reason": view["reason"],
+            "at": _kst(datetime.fromisoformat(str(view["at"]))) if view.get("at") else None,
+            "detail": view["detail"],
+            "api_error_streak": view["api_error_streak"],
+            "peak_equity": _money(dec(view["peak_equity"])) if view.get("peak_equity") else None,
+            "mdd_pct": _num(dec(view["mdd_pct"]), 2) if view.get("mdd_pct") else None,
+        }
+
+    def _account_rules_view(self, repo: Repo, today: date, equity: Decimal) -> dict[str, Any]:
+        guard = AccountRegulationGuard(repo, self.guards.account, self.calendar)
+        info = guard.describe(today, equity)
+        pdt_block = bool(info["pdt_applies"]) and int(info["day_trades"]) >= int(info["day_trade_limit"])
+        status = "block" if pdt_block else ("armed" if info["settlement"] == "cash" else "pass")
+        if info["settlement"] == "cash":
+            detail = f"현금 계좌 · 미결제 매도대금 ${info['unsettled_usd']} 는 T+1 까지 재매수 금지(GFV 방지)"
+        else:
+            detail = (
+                f"마진 계좌 · 5영업일 내 데이트레이드 {info['day_trades']}/{info['day_trade_limit']}"
+                + (" (자산 $25,000 미만 PDT 적용)" if info["pdt_applies"] else " (PDT 미적용)")
+            )
+        return {
+            "status": status,
+            "settlement": info["settlement"],
+            "unsettled_usd": _money(dec(info["unsettled_usd"])),
+            "unsettled_symbols": info["unsettled_symbols"],
+            "day_trades": info["day_trades"],
+            "day_trade_limit": info["day_trade_limit"],
+            "pdt_applies": info["pdt_applies"],
+            "label": ("PDT 한도 도달" if pdt_block else ("GFV 방지" if info["settlement"] == "cash" else "PDT 감시")),
+            "detail": detail,
         }
 
     def _session_view(self, session, now: datetime) -> dict[str, Any]:
@@ -675,7 +716,14 @@ class WebApp:
             "minutes_to_close": window.minutes_to_close(now) if window is not None and session.is_open else None,
         }
 
-    def _guards_view(self, snapshot: MarketSnapshot, session, today: date) -> dict[str, Any]:
+    def _guards_view(
+        self,
+        snapshot: MarketSnapshot,
+        session,
+        today: date,
+        repo: Repo | None = None,
+        equity: Decimal | None = None,
+    ) -> dict[str, Any]:
         market_cfg = self.guards.market
         nq = snapshot.nq_change_pct
         vix = snapshot.vix
@@ -748,6 +796,16 @@ class WebApp:
                            else "FOMC·CPI·NFP 당일 요구 낙폭 " + str(self.guards.macro.drawdown_boost_pct) + "%p 강화"),
             },
             "data": data_view,
+            "account": (
+                self._account_rules_view(repo, today, equity if equity is not None else ZERO)
+                if repo is not None
+                else {"status": "unknown", "label": "계좌 정보 없음", "detail": ""}
+            ),
+            "kill_switch": (
+                self._kill_switch_view(repo)
+                if repo is not None
+                else {"active": False, "reason": "", "detail": {}}
+            ),
         }
 
     def _next_macro(self, today: date) -> str | None:
@@ -889,10 +947,13 @@ class WebApp:
             tp_note = f"현재 VIX {_num(vix, 2)} → 신규 진입 목표 익절 +{_num(target, 1)}% (VIX<{_num(cutoff, 1)} 이면 +{_num(self.strategy.exit.take_profit_low_vix_pct, 1)}%)"
         return (
             f"기준 {stamp} KST · {state} · ATR(20)/RSI(2)/SMA(200)은 일봉 종가, HOD는 1분봉(중앙값×1.15 이상치 제거) "
-            f"· 점수 = 알파 가중치 × (|낙폭| ÷ 진입 임계) · {tp_note}"
+            f"· 점수 = 알파 가중치 × min(|낙폭| ÷ 진입 임계, {self.strategy.entry.score_cap_multiple}) "
+            f"· 고점 대비 -{self.strategy.entry.crash_atr_multiple}×ATR 초과 급락은 당일 제외 · {tp_note}"
         )
 
-    def _position_view(self, position: Position, snapshot: MarketSnapshot, today: date) -> dict[str, Any]:
+    def _position_view(
+        self, position: Position, snapshot: MarketSnapshot, today: date, repo: Repo | None = None
+    ) -> dict[str, Any]:
         last = self._last_price(snapshot, position.symbol) or position.avg_price
         pnl_pct = pct4((last - position.avg_price) / position.avg_price * Decimal(100)) if position.avg_price > ZERO else ZERO
         tp = position.avg_price * (Decimal(1) + position.tp_target_pct / Decimal(100))
@@ -915,9 +976,19 @@ class WebApp:
             "calendar_days": calendar_days,
             "time_exit_trading_days": self.strategy.exit.time_exit_trading_days,
             "time_exit_calendar_days": self.strategy.exit.time_exit_calendar_days,
+            "trailing": self._trail_view(repo, position.symbol) if repo is not None else None,
             "entry_at": _kst(position.entry_at),
             "first_entry_date": position.first_entry_date.isoformat(),
             "entry_vix": _s(position.entry_vix),
+        }
+
+    def _trail_view(self, repo: Repo, symbol: str) -> dict[str, Any] | None:
+        value = repo.kv_get_json(f"trail:{symbol}")
+        if not isinstance(value, dict) or not value.get("high"):
+            return None
+        return {
+            "high": _money(dec(value["high"])),
+            "stop_pct": _num(self.strategy.exit.trailing_drawdown_pct, 1),
         }
 
     def _orders_view(self, repo: Repo) -> list[dict[str, Any]]:
@@ -1013,11 +1084,17 @@ class WebApp:
             else:
                 if path.exists():
                     path.unlink()
+                # 수동 킬스위치를 해제하면 계좌 Kill Switch(Safe Halt)도 함께 해제한다.
+                repo = self.repo_factory()
+                try:
+                    AccountKillSwitch(repo, self.guards.kill_switch).reset(self.clock())
+                finally:
+                    repo.close()
         except OSError as exc:
             return 500, {"ok": False, "error": "halt-write-failed", "detail": str(exc)}
         return 200, {
             "ok": True,
-            "message": "킬스위치를 켰습니다. 신규 매수만 멈추고 청산은 계속합니다." if enable else "킬스위치를 해제했습니다.",
+            "message": "킬스위치를 켰습니다. 신규 매수만 멈추고 청산은 계속합니다." if enable else "킬스위치와 계좌 Kill Switch 를 해제했습니다.",
             "halted": self.halt.halted,
         }
 

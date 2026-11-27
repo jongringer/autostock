@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alpha-shield"
-version = "3.2.0"
-description = "ALPHA SHIELD v3.2 (6-1-F) — 미국장 2슬롯 소수점 자동매매 시스템"
+version = "3.3.0"
+description = "ALPHA SHIELD v3.3 (6-1-F) — 미국장 2슬롯 소수점 자동매매 시스템"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }

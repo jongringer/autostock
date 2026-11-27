@@ -11,7 +11,7 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b1220">
 <meta name="robots" content="noindex, nofollow">
-<title>ALPHA SHIELD v3.2 · 봇 대시보드</title>
+<title>ALPHA SHIELD v3.3 · 봇 대시보드</title>
 <style>
   :root{
     --bg:#0b1220; --bg2:#0e1727; --card:#131d31; --card2:#18243c; --line:#243350;
@@ -159,7 +159,7 @@ PAGE = r"""<!doctype html>
     <div class="logo">▲</div>
     <div>
       <h1>ALPHA SHIELD</h1>
-      <p>v3.2 · 2슬롯 소수점 자동매매 · 봇 내장 대시보드</p>
+      <p>v3.3 · 2슬롯 소수점 자동매매 · 계좌 Kill Switch · 봇 내장 대시보드</p>
     </div>
   </div>
   <div class="topmeta">
@@ -190,7 +190,7 @@ PAGE = r"""<!doctype html>
   </section>
 
   <section class="panel">
-    <h2>5중 다중 방어막</h2>
+    <h2>다중 방어막 (v3.3)</h2>
     <div class="guardgrid" id="guards"></div>
     <p class="foot">매수는 fail-closed(확인 불가 → 정지), 매도는 fail-open(청산은 계속).</p>
   </section>
@@ -307,6 +307,11 @@ PAGE = r"""<!doctype html>
       s.safety.live_allowed ? "실주문 잠금 해제" : "실주문 잠금",
       s.safety.live_allowed ? "warn" : "ok"
     ));
+    var ks = s.kill_switch || {};
+    box.appendChild(chip(
+      ks.active ? "계좌 Kill Switch 발동 · " + (ks.reason || "정지") : "계좌 Kill Switch 대기",
+      ks.active ? "bad" : "ok"
+    ));
   }
 
   function kpi(label, value, sub, tone){
@@ -392,13 +397,24 @@ PAGE = r"""<!doctype html>
       evs.length ? "오늘 " + evs.join("·") : "오늘 발표 없음",
       (mc.detail || "") + (mc.next ? " · 다음 " + mc.next : "")));
     var dt = g.data || {};
-    box.appendChild(guardCard("＋ 데이터 안전장치", dt, dt.label || "",
-      dt.detail || ""));
+    box.appendChild(guardCard("⑥ 데이터 안전장치", dt, dt.label || "",
+      (dt.detail || "") + " · 매도는 직전 5분봉 대비 ±10% 급변 시 보조 시세 크로스체크"));
+    var ac = g.account || {};
+    box.appendChild(guardCard("⑦ 계좌 규정 (GFV·PDT)", ac, ac.label || "",
+      ac.detail || ""));
+    var ks = g.kill_switch || {};
+    box.appendChild(guardCard("⑧ 계좌 Kill Switch", {
+      status: ks.active ? "block" : "pass"
+    }, ks.active ? (ks.reason || "발동") : "대기",
+      ks.active
+        ? "신규 주문 전면 정지(Safe Halt) · 원인 확인 후 수동 해제"
+        : "일손실 -4.0% · MDD -12.0% · 5분 중복 주문 · API 3연속 오류 · 장부 불일치 시 즉시 정지"));
   }
 
   var REASON = {
     "ok":"진입 조건 충족", "no-dip":"눌림 부족", "rsi-too-high":"RSI(2) 높음",
-    "chase-block":"추격 차단(RSI≥70)", "below-sma-floor":"SMA200×0.80 미달",
+    "chase-block":"추격 차단(RSI≥70)", "below-sma-floor":"SMA200×0.95 미달",
+    "abnormal-crash":"비정상 급락(당일 제외)",
     "rsi-unavailable":"RSI 결측", "sma200-unavailable":"SMA200 결측",
     "hod-unavailable":"장중고점 결측", "invalid-price":"가격 이상",
     "quote-missing":"시세 없음", "quote-stale":"시세 지연",
@@ -480,6 +496,7 @@ PAGE = r"""<!doctype html>
       row("목표 익절", "+" + num(p.tp_target_pct) + "% · " + usd(p.tp_price));
       row("손절", "−" + num(p.stop_loss_pct) + "% · " + usd(p.stop_price));
       row("물타기", (p.add_count ? "1회 완료" : "가능") );
+      if (p.trailing) row("트레일링", "고점 " + usd(p.trailing.high) + " · -" + num(p.trailing.stop_pct) + "%");
       row("보유", p.trading_days + "거래일 / " + p.calendar_days + "일");
       row("진입 VIX", num(p.entry_vix));
       card.appendChild(kv);

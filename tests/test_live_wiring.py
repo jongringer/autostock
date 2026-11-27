@@ -128,7 +128,7 @@ class LiveWiringTests(unittest.TestCase):
         def get_order(method, url):
             body = self.last_order_body or {}
             side = body.get("side", "BUY")
-            quantity = body.get("quantity") or "0.885416"
+            quantity = body.get("quantity") or "0.781250"
             amount = body.get("orderAmount") or str((d(quantity) * self.price).quantize(d("0.01")))
             return json_response(
                 {
@@ -211,10 +211,10 @@ class LiveWiringTests(unittest.TestCase):
         self.assertEqual(len(report.buys), 1)
         self.assertEqual(report.buys[0].status, "FILLED")
         order_call = self.http.find("/api/v1/orders", method="POST")
-        self.assertEqual(order_call.json_body["orderAmount"], "85.00")
+        self.assertEqual(order_call.json_body["orderAmount"], "75.00")  # v3.3: 자산 $380 -> $75
         self.assertEqual(order_call.headers["X-Tossinvest-Account"], "7")
         position = self.repo.position("NVDA")
-        self.assertEqual(position.qty, d("0.885416"))
+        self.assertEqual(position.qty, d("0.781250"))
         self.assertEqual(position.avg_price, d("96.00"))
         self.assertEqual(position.tp_target_pct, d("8.0"))
         window = self.calendar.session_on(date(2026, 12, 1))
@@ -232,7 +232,7 @@ class LiveWiringTests(unittest.TestCase):
         self.assertIsNone(self.repo.position("NVDA"))
         sell_call = self.http.all("/api/v1/orders", "POST")[-1]
         self.assertEqual(sell_call.json_body["side"], "SELL")
-        self.assertEqual(sell_call.json_body["quantity"], "0.885416")
+        self.assertEqual(sell_call.json_body["quantity"], "0.781250")
 
 
 if __name__ == "__main__":

@@ -99,11 +99,22 @@ class SessionGuardTests(unittest.TestCase):
         self.assertEqual(self.state(et(2026, 12, 1, 16, 0)).reason, "after-close")
 
     def test_early_close_day(self):
-        # 2026-11-27 (추수감사절 다음날) 은 13:00 ET 마감
+        # 2026-11-27 (추수감사절 다음날) 은 13:00 ET 마감 — 소수점 주문·선제 청산 창도 13:00 기준
         state = self.state(et(2026, 11, 27, 12, 46))
         self.assertEqual(state.reason, "closing-grace")
-        self.assertFalse(state.fractional_sell_allowed)
-        self.assertFalse(self.state(et(2026, 11, 27, 12, 20)).entry_allowed)
+        self.assertTrue(state.fractional_sell_allowed)
+        self.assertFalse(state.entry_allowed)
+        self.assertTrue(self.state(et(2026, 11, 27, 12, 20)).entry_allowed)
+
+    def test_preemptive_window_normal_and_early_close(self):
+        normal = self.calendar.session_on(date(2026, 12, 1))
+        self.assertFalse(normal.in_preemptive_window(et(2026, 12, 1, 14, 49)))
+        self.assertTrue(normal.in_preemptive_window(et(2026, 12, 1, 14, 50)))
+        self.assertTrue(normal.in_preemptive_window(et(2026, 12, 1, 14, 57)))
+        self.assertFalse(normal.in_preemptive_window(et(2026, 12, 1, 14, 58)))
+        early = self.calendar.session_on(date(2026, 11, 27))
+        self.assertTrue(early.in_preemptive_window(et(2026, 11, 27, 12, 52)))
+        self.assertFalse(early.in_preemptive_window(et(2026, 11, 27, 12, 59)))
 
     def test_holiday(self):
         self.assertFalse(self.state(et(2026, 11, 26, 11, 0)).is_open)

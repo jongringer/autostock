@@ -21,7 +21,7 @@ from alpha_shield.cli import build_parser
 from alpha_shield.clock import ET
 from alpha_shield.config import load_all, load_settings
 from alpha_shield.marketdata.base import InMemoryMarketData
-from alpha_shield.models import CycleReport, OrderRequest, OrderResult, Position, Quote
+from alpha_shield.models import Bar, CycleReport, OrderRequest, OrderResult, Position, Quote
 from alpha_shield.state.db import Database
 from alpha_shield.state.repo import Repo
 from alpha_shield.web import WebApp, create_server
@@ -55,8 +55,19 @@ def build_market(**overrides) -> InMemoryMarketData:
         price = dec(97) if symbol == "NVDA" else dec(100 + index)
         quotes[symbol] = Quote(symbol=symbol, last_price=price, timestamp=now)
         daily[symbol] = dip_daily() if symbol == "NVDA" else flat_daily(price)
-        highs = [dec(200), price, price, price] if symbol == "NVDA" else [price, price * dec("1.005"), price]
-        intraday[symbol] = make_intraday(highs, price, day=now.date())
+        if symbol == "NVDA":
+            # 고가 200 스파이크(시가·종가 100)는 HOD 이상치 필터가 100 으로 대체해야 한다.
+            bars = make_intraday([dec("100"), price, price], price, day=now.date())
+            first = bars[0]
+            bars[0] = Bar(
+                timestamp=first.timestamp, open=dec("100"), high=dec("200"),
+                low=dec("99.5"), close=dec("100"),
+            )
+            intraday[symbol] = bars
+        else:
+            intraday[symbol] = make_intraday(
+                [price, price * dec("1.005"), price], price, day=now.date()
+            )
     market = InMemoryMarketData(
         quotes=quotes,
         daily=daily,
@@ -203,11 +214,15 @@ def test_status_payload_shape(harness):
         "total": 2,
         "used": 0,
         "free": 2,
-        "tier": {"entry_usd": "85.00", "cap_usd": "170.00"},
+        "tier": {"entry_usd": "75.00", "cap_usd": "150.00"},
     }
     assert len(body["universe"]) == 8
     assert {item["symbol"] for item in body["universe"]} == set(UNIVERSE)
-    assert set(body["guards"]) == {"market", "session", "events", "filings", "news", "macro", "data"}
+    assert set(body["guards"]) == {
+        "market", "session", "events", "filings", "news", "macro", "data", "account", "kill_switch"
+    }
+    assert body["kill_switch"]["active"] is False
+    assert body["account_rules"]["settlement"] == "cash"
     assert body["safety"]["live_allowed"] is False
     assert body["safety"]["armed"] is False
     assert "KST" in body["clock"]["kst"]
@@ -220,7 +235,7 @@ def test_universe_indicators_and_ready_candidate(harness):
     assert nvda["status"] == "ready"
     assert nvda["status_label"] == "진입 조건 충족"
     assert Decimal(nvda["rsi2"]) <= Decimal("15")
-    assert Decimal(nvda["drawdown_pct"]) < Decimal("-10")
+    assert Decimal(nvda["drawdown_pct"]) < Decimal("-2")
     assert Decimal(nvda["score"]) > 0
     assert nvda["change_pct"] is not None  # 일봉이 늦게 와도 등락률이 채워진다
     assert nvda["sma200"] is not None and nvda["threshold_pct"] is not None

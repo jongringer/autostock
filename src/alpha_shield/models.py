@@ -59,7 +59,7 @@ class OrderRequest:
 
     - 매수(금액): amount_usd 지정 (토스 `orderAmount`, US MARKET 전용)
     - 매도(수량): qty 지정 (토스 `quantity`, 소수 6자리)
-    - 매수(수량·지정가): qty + limit_price (정수주 모드에서만, v3.2 기본 경로 아님)
+    - 매수(수량·지정가): qty + limit_price (정수주 모드에서만, v3.3 기본 경로 아님)
     """
 
     symbol: str

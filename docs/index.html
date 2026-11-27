@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ALPHA SHIELD v3.2 · 실시간 전략·모의매매</title>
-<meta name="description" content="ALPHA SHIELD v3.2 전략을 브라우저에서 직접 계산해 보여주는 실시간 판정표와 2슬롯 모의매매 시뮬레이터. 실제 주문은 나가지 않습니다.">
+<title>ALPHA SHIELD v3.3 · 실시간 전략·모의매매</title>
+<meta name="description" content="ALPHA SHIELD v3.3 전략을 브라우저에서 직접 계산해 보여주는 실시간 판정표와 2슬롯 모의매매 시뮬레이터. 실제 주문은 나가지 않습니다.">
 <meta name="theme-color" content="#0a1220">
 <meta name="robots" content="noindex, nofollow">
 <link rel="manifest" href="./manifest.webmanifest">
@@ -152,7 +152,7 @@
     </div>
     <div>
       <h1>ALPHA SHIELD</h1>
-      <p>v3.2 · 2슬롯 소수점 전략 · 브라우저 모의매매</p>
+      <p>v3.3 · 2슬롯 소수점 전략 · 계좌 Kill Switch · 브라우저 모의매매</p>
     </div>
   </div>
   <div class="topmeta">
@@ -174,9 +174,9 @@
   </section>
 
   <section class="panel">
-    <h2>5중 다중 방어막 <small>브라우저가 직접 계산</small></h2>
+    <h2>다중 방어막 (v3.3) <small>브라우저가 직접 계산</small></h2>
     <div class="guardgrid" id="guards"></div>
-    <p class="foot">실적·8-K·뉴스 가드는 외부 캘린더를 브라우저에서 안전하게 부를 수 없어 <b>봇 대시보드(`python -m alpha_shield --web`)</b> 에서 확인합니다. 이 페이지는 시장·세션·거시·데이터 가드와 전략 판정을 그대로 재현합니다.</p>
+    <p class="foot">실적·8-K·뉴스 가드와 계좌 규정(GFV·PDT)·계좌 Kill Switch 상태는 <b>봇 대시보드(`python -m alpha_shield --web`)</b> 에서 확인합니다. 이 페이지는 시장·세션·거시·데이터 가드와 v3.3 전략 판정(점수 2.5배 캡 · 비정상 급락 제외 · SMA200×0.95)을 그대로 재현합니다.</p>
   </section>
 
   <section class="panel">
@@ -232,12 +232,19 @@
 const SYMS = ["NVDA","TSLA","AMZN","TSM","AVGO","QQQ","AAPL","GOOGL"];
 const WEIGHT = {NVDA:1.5, TSLA:1.4, AMZN:1.2, TSM:1.1, AVGO:1.0, QQQ:1.0, AAPL:0.9, GOOGL:0.9};
 const OPTS = {
-  atr:20, mult:0.52, rsi:2, rsiMax:15, chase:70, sma:200, floor:0.80,
+  atr:20, mult:0.52, rsi:2, rsiMax:15, chase:70, sma:200, floor:0.95,
+  scoreCap:2.5, crashMult:3.0,
   fallback:{QQQ:0.7, AAPL:1.0, GOOGL:1.0, AMZN:1.3}, fallbackDefault:1.5,
   signalTtl:900, redeliveryRsi:25,
-  add:{trigger:1.5, rsiMax:35, max:1},
-  exit:{stop:5.0, stopAdded:3.5, vixLow:18.0, tpLow:8.0, tpHigh:5.0, timeTd:10, timeCd:14, cooldown:900},
-  cap:{slots:2, threshold:500, smallEntry:85, smallCap:170, largeEntry:120, largeCap:240, bufferPct:0.15, bufferMin:55, minOrder:10},
+  add:{trigger:1.5, atrMult:0.8, rsiMax:35, max:1, minHours:2},
+  exit:{stop:5.0, stopAdded:3.5, nearStop:0.5, vixLow:18.0, tpLow:8.0, tpHigh:5.0,
+        timeTd:10, timeCd:14, cooldown:900, eodCooldown:true,
+        trailOnTimeExit:true, trailTrigger:3.0, trailDrop:2.0},
+  cap:{slots:2, tiers:[
+         {max:400, entry:75, cap:150},
+         {max:500, entry:85, cap:170},
+         {max:null, entry:120, cap:240}
+       ], bufferPct:0.15, bufferMin:55, minOrder:10},
   slip:0.0005, fee:0.001
 };
 const HOLIDAYS = new Set(["2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25"]);
@@ -247,7 +254,7 @@ const MACRO = {
   CPI:["2026-01-13","2026-02-13","2026-03-11","2026-04-10","2026-05-12","2026-06-10","2026-07-14","2026-08-12","2026-09-11","2026-10-14","2026-11-10","2026-12-10"],
   NFP:["2026-01-09","2026-02-11","2026-03-06","2026-04-03","2026-05-08","2026-06-05","2026-07-02","2026-08-07","2026-09-04","2026-10-02","2026-11-06","2026-12-04"]
 };
-const STORE_KEY = "alphaShield.paper.v32";
+const STORE_KEY = "alphaShield.paper.v33";
 const HIST_TTL = 6*3600*1000, INTRA_TTL = 5*60*1000, QUOTE_EVERY = 20*1000;
 
 /* ================================================================ 유틸 */
@@ -287,8 +294,9 @@ function session(){
   if (m < 9*60+30) return {label:"개장 전", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin, early:!!early};
   if (m >= closeMin) return {label:"장 마감", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin, early:!!early};
   if (m < entryStart) return {label:"개장 유예 (매수 금지)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early};
-  if (m < entryEnd) return {label:"정규장 · 매수 가능", open:true, entry:true, sell:true, state:"ok", ymd:p.ymd, now:p, closeMin, early:!!early};
-  if (m < fracMin) return {label:"마감 유예 (청산만)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early};
+  if (m < entryEnd) return {label:"정규장 · 매수 가능", open:true, entry:true, sell:true, state:"ok", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin};
+  if (m >= fracMin-10 && m < fracMin-2) return {label:"선제 청산 창 (14:50~14:58 ET)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin, preemptive:true};
+  if (m < fracMin) return {label:"마감 유예 (청산만)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin};
   if (m < closeMin) return {label:"소수점 마감 (청산 불가)", open:true, entry:false, sell:false, state:"bad", ymd:p.ymd, now:p, closeMin, early:!!early};
   return {label:"장 마감", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin, early:!!early};
 }
@@ -537,7 +545,9 @@ function symbolData(sym){
   const boost = macroToday().length ? 0.5 : 0;
   const threshold = (atrPct===null || atrPct<=0) ? (fallback+boost) : (atrPct*OPTS.mult + boost);
   const dd = (px!==null && hod) ? (px-hod)/hod*100 : null;
-  const score = (dd!==null && threshold>0) ? WEIGHT[sym]*(Math.abs(dd)/threshold) : null;
+  const ratio = (dd!==null && threshold>0) ? Math.min(Math.abs(dd)/threshold, OPTS.scoreCap) : null;
+  const score = ratio!==null ? WEIGHT[sym]*ratio : null;
+  const crashLimit = (atrPct!==null && atrPct>0) ? atrPct*OPTS.crashMult : null;
   const reasons = [];
   if (px===null) reasons.push("quote-missing");
   if (rsi===null) reasons.push("rsi-unavailable");
@@ -545,6 +555,7 @@ function symbolData(sym){
   if (hod===null) reasons.push("hod-unavailable");
   if (px!==null && sma200!==null && px < sma200*OPTS.floor) reasons.push("below-sma-floor");
   if (rsi!==null && rsi>=OPTS.chase) reasons.push("chase-block");
+  if (crashLimit!==null && dd!==null && dd <= -crashLimit) reasons.push("abnormal-crash");
   if (dd!==null && Math.abs(dd) < threshold) reasons.push("no-dip");
   if (rsi!==null && rsi>OPTS.rsiMax) reasons.push("rsi-too-high");
   // 등락률은 일봉 종가 기준으로 계산한다(장 마감·장중 모두 최근 거래일 대비).
@@ -557,12 +568,13 @@ function symbolData(sym){
     if (prev>0) chg = (px-prev)/prev*100;
   }
   return {sym, px, chg, atrPct, rsi, sma200, hod, hodSrc, threshold, dd, score, reasons,
-          ready: reasons.length===0, changeAge: q?nowMs()-q.t:null};
+          crashLimit, ready: reasons.length===0, changeAge: q?nowMs()-q.t:null};
 }
 
 const REASON = {
   "ok":"진입 조건 충족","no-dip":"눌림 부족","rsi-too-high":"RSI(2) 높음","chase-block":"추격 차단(RSI≥70)",
-  "below-sma-floor":"SMA200×0.80 미달","rsi-unavailable":"RSI 결측","sma200-unavailable":"SMA200 결측",
+  "below-sma-floor":"SMA200×0.95 미달","abnormal-crash":"비정상 급락(당일 제외)",
+  "rsi-unavailable":"RSI 결측","sma200-unavailable":"SMA200 결측",
   "hod-unavailable":"장중고점 결측","quote-missing":"시세 없음","no-data":"데이터 없음"
 };
 const reasonText = r => REASON[r] || r;
@@ -583,8 +595,12 @@ function simEquity(){ let v=SIM.cash; SIM.positions.forEach(p=>{ const px=priceO
 function simPositionsValue(){ let v=0; SIM.positions.forEach(p=>{ const px=priceOf(p.sym); v += p.qty*(px||p.avg); }); return v; }
 function buffer(){ return Math.max(simEquity()*OPTS.cap.bufferPct, OPTS.cap.bufferMin); }
 function spendable(){ return Math.max(0, SIM.cash - buffer()); }
-function entryAmount(){ return simEquity() < OPTS.cap.threshold ? OPTS.cap.smallEntry : OPTS.cap.largeEntry; }
-function symbolCap(){ return simEquity() < OPTS.cap.threshold ? OPTS.cap.smallCap : OPTS.cap.largeCap; }
+function tierFor(eq){
+  for (const t of OPTS.cap.tiers){ if (t.max===null || eq < t.max) return t; }
+  return OPTS.cap.tiers[OPTS.cap.tiers.length-1];
+}
+function entryAmount(){ return tierFor(simEquity()).entry; }
+function symbolCap(){ return tierFor(simEquity()).cap; }
 function posOf(sym){ return SIM.positions.find(p=>p.sym===sym) || null; }
 
 function buy(sym, amount, reason){
@@ -617,7 +633,7 @@ function buy(sym, amount, reason){
   saveSim(); renderAll();
   return true;
 }
-function sell(sym, reason){
+function sell(sym, reason, kind){
   const pos = posOf(sym); if (!pos) return false;
   const px = priceOf(sym); if (!px) { toast(sym+" 시세가 없습니다.", "bad"); return false; }
   const fill = px*(1-OPTS.slip);
@@ -627,7 +643,15 @@ function sell(sym, reason){
   const pnl = proceeds - pos.qty*pos.avg;
   SIM.cash = round(SIM.cash + proceeds, 4);
   SIM.positions = SIM.positions.filter(p=>p!==pos);
-  SIM.cool[sym] = nowMs() + OPTS.exit.cooldown*1000;
+  if (kind==="stop" && OPTS.exit.eodCooldown){
+    // 손절 후에는 당일 재진입 금지 — ET 마감(16:00 / 조기 13:00)까지 쿨다운
+    const s = session();
+    const p = etParts();
+    const remainMin = Math.max(0, s.closeMin - p.minutes);
+    SIM.cool[sym] = nowMs() + remainMin*60*1000 + 60000;
+  } else {
+    SIM.cool[sym] = nowMs() + OPTS.exit.cooldown*1000;
+  }
   SIM.trades.unshift({t:nowMs(), sym, side:"SELL", qty:pos.qty, price:round(fill,4), amount:round(notional,2), fee, reason, pnl:round(pnl,2)});
   logLine(sym+" 모의 청산 "+pos.qty+"주 · "+reason+" · 손익 "+usd(pnl));
   saveSim(); renderAll();
@@ -635,6 +659,13 @@ function sell(sym, reason){
 }
 function addTo(sym){
   const pos = posOf(sym); if (!pos) return buy(sym, entryAmount(), "entry");
+  const d0 = symbolData(sym);
+  const required = Math.max(OPTS.add.trigger, (d0.atrPct||0)*OPTS.add.atrMult);
+  const gapNow = ((d0.px||0) - pos.avg)/pos.avg*100;
+  if (gapNow > -required){ toast("물타기 조건 미달 — 평단 대비 -"+required.toFixed(2)+"% 이상 필요", "bad"); return false; }
+  if (pos.entryTs && nowMs() - pos.entryTs < OPTS.add.minHours*3600*1000 && etParts().ymd === pos.entryDate){
+    toast("물타기는 1차 진입 후 "+OPTS.add.minHours+"시간(또는 익거래일) 이후에만 가능합니다.", "bad"); return false;
+  }
   const px = priceOf(sym); if (!px) return false;
   const room = symbolCap() - pos.qty*px;
   const amount = Math.min(entryAmount(), room, spendable());
@@ -656,9 +687,25 @@ function autoStep(manual){
     const px = priceOf(pos.sym); if (!px) return;
     const p = (px-pos.avg)/pos.avg*100;
     if (!s.sell && !manual) { return; }
-    if (p <= -stopPct(pos)) { sell(pos.sym, "손절 "+p.toFixed(2)+"%"); return; }
-    if (p >= pos.tp) { sell(pos.sym, "익절 "+p.toFixed(2)+"%"); return; }
-    if (timeExitExpired(pos)) { sell(pos.sym, "시간청산"); }
+    if (p <= -stopPct(pos)) { sell(pos.sym, "손절 "+p.toFixed(2)+"%", "stop"); return; }
+    if (p >= pos.tp) { sell(pos.sym, "익절 "+p.toFixed(2)+"%", "tp"); return; }
+    // v3.3: 14:50~14:58 ET 선제 청산 — 손절선 0.5%p 이내 근접 / 만기 종목
+    if (s.preemptive){
+      const near = stopPct(pos) - OPTS.exit.nearStop;
+      if (p <= -near) { sell(pos.sym, "선제 청산 "+p.toFixed(2)+"%", "stop"); return; }
+      if (timeExitExpired(pos)) { sell(pos.sym, "만기 선제 청산", "time"); return; }
+    }
+    if (timeExitExpired(pos)) {
+      if (OPTS.exit.trailOnTimeExit && p >= OPTS.exit.trailTrigger){
+        // +3% 이상 상승 추세는 바로 팔지 않고 고점 대비 -2.0% 트레일링
+        pos.trailHigh = Math.max(pos.trailHigh||0, px);
+        if (px <= pos.trailHigh*(1-OPTS.exit.trailDrop/100)) { sell(pos.sym, "트레일링 이탈", "tp"); }
+        return;
+      }
+      sell(pos.sym, "시간청산", "time");
+      return;
+    }
+    if (pos.trailHigh){ pos.trailHigh = Math.max(pos.trailHigh, px); }
   });
   if (!s.entry && !manual) return;
   // 2) 물타기 (슬롯을 쓰지 않는다)
@@ -666,9 +713,11 @@ function autoStep(manual){
     const d = symbolData(pos.sym);
     if ((pos.addCount||0) >= OPTS.add.max) return;
     if (d.px===null || d.rsi===null) return;
+    const required = Math.max(OPTS.add.trigger, (d.atrPct||0)*OPTS.add.atrMult);
     const gap = (d.px-pos.avg)/pos.avg*100;
-    if (gap > -OPTS.add.trigger) return;
+    if (gap > -required) return;
     if (d.rsi > OPTS.add.rsiMax) return;
+    if (pos.entryTs && nowMs() - pos.entryTs < OPTS.add.minHours*3600*1000 && etParts().ymd === pos.entryDate) return;
     const room = symbolCap() - pos.qty*d.px;
     const amount = Math.min(entryAmount(), room, spendable());
     if (amount >= OPTS.cap.minOrder) buy(pos.sym, amount, "add");
@@ -872,8 +921,10 @@ function renderSlots(){
       box.appendChild(d);
     }
   }
-  $("simFoot").textContent = "규칙: 신규 진입 −0.52×ATR(20)% 눌림 + RSI(2)≤15 + 주가≥SMA200×0.80 · 물타기 평단 대비 −1.5% & RSI≤35 1회 · "+
-    "익절 진입 VIX<18 → +8%, 아니면 +5% · 손절 −5.0%(물타기 −3.5%) · 시간청산 10거래일/14일 · 쿨다운 15분";
+  $("simFoot").textContent = "규칙: 신규 진입 −0.52×ATR(20)% 눌림 + RSI(2)≤15 + 주가≥SMA200×0.95 · 점수 낙폭 비율 최대 2.5배 캡 · "+
+    "−3.0×ATR(20)% 초과 급락은 당일 제외 · 물타기 max(−1.5%, 0.8×ATR) & RSI≤35 · 1차 진입 2시간 후 1회 · "+
+    "익절 진입 VIX<18 → +8%, 아니면 +5% · 손절 −5.0%(물타기 −3.5%) · 14:50~14:58 ET 선제 청산 · "+
+    "시간청산 10거래일/14일(+3% 이상은 고점 대비 −2% 트레일링) · 손절 시 당일 재진입 금지 · 일반 쿨다운 15분";
 }
 
 function renderTrades(){

@@ -65,7 +65,13 @@ class SessionWindow:
         return start <= to_et(now) < end
 
     def fractional_deadline(self, close_buffer_min: int = 60) -> datetime:
-        """소수점(금액 매수·소수 매도) 주문 마감 = 정규장 종료 1시간 전 (15:00 ET)."""
+        """소수점(금액 매수·소수 매도) 주문 마감.
+
+        정규장은 종료 1시간 전(15:00 ET). 조기폐장일(13:00 ET)은 스펙대로 종료 시각까지
+        소수점 주문·선제 청산 창(12:50~12:58 ET)을 쓴다.
+        """
+        if self.early_close:
+            return self.regular_end
         return self.regular_end - timedelta(minutes=close_buffer_min)
 
     def fractional_sell_allowed(self, now: datetime, close_buffer_min: int = 60) -> bool:
@@ -77,6 +83,39 @@ class SessionWindow:
         """마감 전 15분(14:45~15:00 ET) — 신규 매수 금지, 청산만 허용."""
         start = self.fractional_deadline(fractional_close_buffer_min) - timedelta(minutes=close_buffer_min)
         return start <= to_et(now) < self.regular_end
+
+    # --- v3.3 15:00 소수점 마감 프로토콜 ------------------------------------
+    def preemptive_window(
+        self,
+        close_buffer_min: int = 60,
+        start_min: int = 10,
+        end_min: int = 2,
+    ) -> tuple[datetime, datetime]:
+        """선제 청산 창 — 14:50~14:58 ET (조기폐장 12:50~12:58 ET)."""
+        deadline = self.fractional_deadline(close_buffer_min)
+        return deadline - timedelta(minutes=start_min), deadline - timedelta(minutes=end_min)
+
+    def in_preemptive_window(
+        self,
+        now: datetime,
+        close_buffer_min: int = 60,
+        start_min: int = 10,
+        end_min: int = 2,
+    ) -> bool:
+        start, end = self.preemptive_window(close_buffer_min, start_min, end_min)
+        return start <= to_et(now) < end
+
+    def overnight_stop_allowed(self, now: datetime, open_min: int = 2) -> bool:
+        """오버나잇 갭하락 손절 집행 시각(09:32 ET) 이후인가."""
+        return to_et(now) >= self.regular_start + timedelta(minutes=open_min)
+
+    def premarket_flush_allowed(self, now: datetime, open_gap_min: int = 2) -> bool:
+        """프리마켓 예약 매도 집행 창 — 09:30~09:32 ET."""
+        return self.regular_start <= to_et(now) < self.regular_start + timedelta(minutes=open_gap_min)
+
+    def is_premarket(self, now: datetime) -> bool:
+        """정규장 개장 전(당일 프리마켓)인가."""
+        return to_et(now) < self.regular_start
 
     def minutes_to_close(self, now: datetime) -> int:
         return int((self.regular_end - to_et(now)).total_seconds() // 60)

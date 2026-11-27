@@ -82,8 +82,11 @@ def make_intraday(
     return bars
 
 
-def falling_closes(count: int = 220, start: object = "110", end: object = "96") -> list[Decimal]:
-    """완만한 상승 후 마지막 4일 급락 — RSI(2) <= 15, SMA200 위."""
+def falling_closes(count: int = 220, start: object = "100.5", end: object = "96") -> list[Decimal]:
+    """완만한 보합 후 마지막 4일 하락 — RSI(2) <= 15, SMA200 x 0.95 위.
+
+    v3.3 은 SMA200 바닥을 0.95 로 올렸으므로, 200일선에서 5% 안쪽인 종목으로 만든다.
+    """
     values = [d(start)] * count
     step = (d(start) - d(end)) / Decimal(4)
     for offset in range(4):

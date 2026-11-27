@@ -23,6 +23,10 @@ class SizingTests(unittest.TestCase):
         cls.cfg = load_strategy(ROOT / "config" / "strategy.yaml").capital
 
     def test_tier_boundary(self):
+        # v3.3 권장안 A: <$400 75/150 · $400~$500 미만 85/170 · >=$500 120/240
+        self.assertEqual(tier_for(d("399.99"), self.cfg).slot_amount, d("75.00"))
+        self.assertEqual(tier_for(d("399.99"), self.cfg).symbol_cap, d("150.00"))
+        self.assertEqual(tier_for(d("400.00"), self.cfg).slot_amount, d("85.00"))
         self.assertEqual(tier_for(d("499.99"), self.cfg).slot_amount, d("85.00"))
         self.assertEqual(tier_for(d("499.99"), self.cfg).symbol_cap, d("170.00"))
         self.assertEqual(tier_for(d("500.00"), self.cfg).slot_amount, d("120.00"))
@@ -40,8 +44,8 @@ class SizingTests(unittest.TestCase):
 
     def test_plan_new_entry_uses_slot_amount(self):
         budget = Budget(d("100"))
-        self.assertEqual(plan_new_entry(d("380"), d("380"), self.cfg, budget), d("85.00"))
-        self.assertEqual(budget.remaining, d("15.00"))
+        self.assertEqual(plan_new_entry(d("380"), d("380"), self.cfg, budget), d("75.00"))
+        self.assertEqual(budget.remaining, d("25.00"))
 
     def test_plan_new_entry_respects_buffer(self):
         # 현금 120 - 버퍼 max(380x15%=57, 55)=57 -> 63 (최소주문 10 이상)
@@ -60,8 +64,11 @@ class SizingTests(unittest.TestCase):
     def test_plan_add_capped_by_symbol_cap(self):
         position = Position("NVDA", d("1"), d("100"), et(2026, 11, 30, 10), date(2026, 11, 30), d("8"))
         budget = Budget(d("500"))
-        # 노출 1 x 100 = 100, 상한 170 -> 70
-        self.assertEqual(plan_add(position, d("100"), d("380"), d("380"), self.cfg, budget), d("70.00"))
+        # 자산 380 -> 상한 150, 노출 1 x 100 = 100 -> 50
+        self.assertEqual(plan_add(position, d("100"), d("380"), d("380"), self.cfg, budget), d("50.00"))
+        # 자산 600 -> 1회 진입 120 이 상한(240-100=140)보다 작다
+        budget = Budget(d("500"))
+        self.assertEqual(plan_add(position, d("100"), d("600"), d("600"), self.cfg, budget), d("120.00"))
 
     def test_plan_add_no_room(self):
         position = Position("NVDA", d("2"), d("85"), et(2026, 11, 30, 10), date(2026, 11, 30), d("8"))

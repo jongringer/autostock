@@ -1,6 +1,7 @@
 # ============================================================================
-# ALPHA SHIELD v3.2 — 5중 다중 방어막 파라미터
+# ALPHA SHIELD v3.3 — 다중 방어막 · 계좌 규정 · 계좌 Kill Switch 파라미터
 # 원칙: 매수는 fail-Closed (확인 불가면 멈춤), 매도는 fail-Open (항상 작동).
+#       단, 계좌 단위 Kill Switch(Safe Halt)는 매도까지 포함해 신규 주문을 전면 정지한다.
 # ============================================================================
 
 market:
@@ -11,9 +12,28 @@ market:
   fail_closed: true              # NQ/VIX 확인 불가 -> 매수 차단
 
 session:
-  entry_open_delay_min: 15       # 개장 초 15분 (09:30~09:45 ET) 유예
+  entry_open_delay_min: 15       # 개장 초 15분 (09:30~09:45 ET) 유예 — 신규 매수·물타기 전용
   entry_close_buffer_min: 15     # 마감 전 15분 (정규 14:45~15:00, 조기 12:45~13:00 ET) 유예
   fractional_close_buffer_min: 60 # 소수점 주문 마감 = 정규장 종료 1시간 전 (15:00 ET)
+  preemptive_start_min: 10       # 14:50 ET (= 소수점 마감 10분 전) 선제 청산 시작
+  preemptive_end_min: 2          # 14:58 ET (= 소수점 마감 2분 전) 선제 청산 종료
+  overnight_stop_after_open_min: 2 # 오버나잇 갭하락 손절은 09:32 ET 이후 실행
+  premarket_flush_min: 2         # 프리마켓 예약 매도는 09:30~09:32 ET 에 집행
+
+account:
+  settlement: cash               # cash(현금 계좌) | margin(마진 계좌)
+  unsettled_rebuy_block: true    # 현금 계좌 미결제 자금(T+1) 재매수 차단 (GFV 방지)
+  settlement_business_days: 1    # 결제일 T+1
+  pdt_min_equity_usd: 25000.00   # 마진 계좌 $25,000 미만이면 PDT 규정 적용
+  pdt_day_trade_limit: 3         # 5영업일 내 당일 매수·매도 3회
+  pdt_window_business_days: 5
+
+kill_switch:
+  daily_loss_pct: 4.0            # 일일 손실(실현+미실현) -4.0% 도달 -> Safe Halt
+  mdd_pct: 12.0                  # 누적 최고 자산 대비 -12.0% 돌파 -> Safe Halt
+  duplicate_window_seconds: 300  # 5분 내 동일 종목·방향 중복 주문 시도 -> Safe Halt
+  api_error_threshold: 3         # API 3회 연속 오류 -> Safe Halt
+  halt_on_mismatch: true         # 장부·실잔고 불일치 감지 -> Safe Halt
 
 events:
   earnings_block_before_days: 1  # 실적 D-1 ~ 당일 차단
@@ -40,7 +60,7 @@ filings:
     - "resignation of"
     - "ceo resign"
     - "cfo resign"
-  sec_user_agent: "alpha-shield/3.2 (연락처는 .env 의 SEC_USER_AGENT 로 설정)"
+  sec_user_agent: "alpha-shield/3.3 (연락처는 .env 의 SEC_USER_AGENT 로 설정)"
   cik:
     NVDA: "1045810"
     TSLA: "1318605"
@@ -80,9 +100,13 @@ data:
   max_quote_age_seconds: 900     # 시세 15분 이상 지연/결측 -> 매수 보류
   max_daily_bar_age_days: 5      # 일봉이 이보다 오래되면 지표 불신
   require_sma200: true
+  tick_guard_pct: 10.0           # 매도 시 직전 5분봉 대비 ±10% 이상 급변
+  tick_guard_bar_minutes: 5
+  tick_guard_tolerance_pct: 1.5  # 보조 시세 허용 차이
+  tick_guard_fail_closed: true   # 보조 시세 미확인 -> 가짜 손절 차단(매도 보류)
 
 risk:
-  daily_loss_limit_pct: 5.0      # 당일 자산 -5% -> 그날 신규 매수 정지
+  daily_loss_limit_pct: 4.0      # 당일 자산 -4% -> 그날 신규 매수 정지 (Kill Switch 와 동일 임계)
   max_orders_per_minute: 6       # 어뷰징 방지
   duplicate_order_window_seconds: 60
   reconcile_qty_tolerance: 0.000001

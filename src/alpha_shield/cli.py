@@ -41,7 +41,7 @@ LOG = logging.getLogger("alpha_shield")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alpha-shield",
-        description="ALPHA SHIELD v3.2 (6-1-F) 미국장 2슬롯 소수점 자동매매",
+        description="ALPHA SHIELD v3.3 (6-1-F) 미국장 2슬롯 소수점 자동매매",
     )
     parser.add_argument("--version", action="version", version=f"alpha-shield {__version__}")
     parser.add_argument("--mode", choices=["dry-run", "paper", "live"], help="실행 모드 (기본: .env 의 ALPHA_MODE 또는 dry-run)")
@@ -88,6 +88,7 @@ def build_engine(settings: Settings, strategy, guards, repo: Repo, root: Path) -
     clock = SystemClock()
 
     toss_client = None
+    crosscheck = None
     if settings.normalized_mode == "live":
         if not settings.toss_client_id or not settings.toss_client_secret:
             raise ConfigError("live 모드에는 TOSS_CLIENT_ID / TOSS_CLIENT_SECRET 이 필요합니다")
@@ -101,6 +102,17 @@ def build_engine(settings: Settings, strategy, guards, repo: Repo, root: Path) -
         )
         calendar = TossUsCalendar(toss_client, StaticUsCalendar(root / "config" / "market_calendar_2026.json"))
         market_data = CompositeMarketData(TossMarketData(toss_client), yahoo)
+
+        def _yahoo_crosscheck(symbol: str):
+            """이상 틱 가드 보조 시세 — 토스 1차 시세와 독립된 Yahoo 공개 시세."""
+            try:
+                quote = yahoo.quotes([symbol]).get(symbol)
+            except Exception:  # noqa: BLE001 - 보조 소스 실패는 미확인
+                return None
+            return None if quote is None else quote.last_price
+
+        crosscheck = _yahoo_crosscheck
+
         safety = SafetyLock(settings.live_orders_env, settings.armed_file)
         safety.assert_live()
         broker = TossBroker(
@@ -109,6 +121,7 @@ def build_engine(settings: Settings, strategy, guards, repo: Repo, root: Path) -
             min_order_usd=strategy.capital.min_order_usd,
             session_provider=lambda now: calendar.session_on(now.date()),
             fractional_close_buffer_min=guards.session.fractional_close_buffer_min,
+            allow_fractional_premarket_sell=settings.allow_fractional_premarket_sell,
             clock=clock.now,
         )
     else:
@@ -164,19 +177,16 @@ def build_engine(settings: Settings, strategy, guards, repo: Repo, root: Path) -
         filings_provider=filings,
         news_provider=news,
         macro_calendar=macro_calendar,
+        allow_fractional_premarket_sell=settings.allow_fractional_premarket_sell,
+        tick_crosscheck=crosscheck,
     )
 
 
 def print_check(settings: Settings, strategy, guards) -> None:
-    print("=== ALPHA SHIELD v3.2 점검 ===")
+    print("=== ALPHA SHIELD v3.3 점검 ===")
     print(json.dumps(settings.as_safe_dict(), ensure_ascii=False, indent=2))
     print(f"유니버스: {', '.join(f'{symbol}({weight})' for symbol, weight in strategy.universe.weights.items())}")
-    print(
-        f"자금: 2슬롯 / <${strategy.capital.threshold_usd} ${strategy.capital.small_entry_usd}"
-        f"·상한 ${strategy.capital.small_symbol_cap_usd} /"
-        f">=${strategy.capital.threshold_usd} ${strategy.capital.large_entry_usd}"
-        f"·상한 ${strategy.capital.large_symbol_cap_usd}"
-    )
+    print(f"자금: 2슬롯 · 권장안 {strategy.capital.plan} · {strategy.capital.describe_tiers()}")
     print(
         f"버퍼: max(자산x{strategy.capital.cash_buffer_pct:.0%}, ${strategy.capital.cash_buffer_min_usd})"
         f" / 최소주문 ${strategy.capital.min_order_usd}"
@@ -192,6 +202,12 @@ def print_check(settings: Settings, strategy, guards) -> None:
         f"아니면 +{strategy.exit.take_profit_high_vix_pct}% / {strategy.exit.time_exit_trading_days}거래일"
     )
     print(f"가드: NQ -{guards.market.nq_block_pct}% / VIX {guards.market.vix_block} / 시세지연 {guards.data.max_quote_age_seconds}s")
+    print(
+        f"계좌: {guards.account.settlement} / PDT {guards.account.pdt_day_trade_limit}회(5영업일, "
+        f"${guards.account.pdt_min_equity_usd} 미만) / Kill Switch 일손실 -{guards.kill_switch.daily_loss_pct}% "
+        f"· MDD -{guards.kill_switch.mdd_pct}% · API {guards.kill_switch.api_error_threshold}연속"
+    )
+    print(f"프리마켓 소수점 매도: {'허용' if settings.allow_fractional_premarket_sell else '미지원(09:30~09:32 예약 큐)'}")
     lock = SafetyLock(settings.live_orders_env, settings.armed_file)
     print(f"이중 안전잠금: {json.dumps(lock.describe(), ensure_ascii=False)}")
     if settings.normalized_mode == "live" and not lock.live_allowed:

@@ -18,7 +18,7 @@ from typing import Any, Mapping, Protocol
 LOG = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15.0
-DEFAULT_UA = "alpha-shield/3.2 (+https://github.com/jongringer/autostock)"
+DEFAULT_UA = "alpha-shield/3.3 (+https://github.com/jongringer/autostock)"
 
 
 class TransportError(RuntimeError):

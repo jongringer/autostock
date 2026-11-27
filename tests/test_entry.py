@@ -41,8 +41,8 @@ class EntryTests(unittest.TestCase):
         self.assertTrue(evaluation.allowed, evaluation.reasons)
         self.assertEqual(evaluation.threshold_pct, d("1.04"))
         self.assertEqual(evaluation.drawdown_pct, d("-4.4776"))
-        # score = 1.5 x (4.4776 / 1.04)
-        self.assertAlmostEqual(float(evaluation.score), 1.5 * 4.4776 / 1.04, places=2)
+        # score = 1.5 x min(4.4776 / 1.04, 2.5) — v3.3 낙폭 비율 2.5배 상한 캡
+        self.assertEqual(evaluation.score, d("3.75"))
 
     def test_entry_blocked_without_enough_dip(self):
         evaluation = evaluate_entry(self.inputs(last_price=d("100.00"), hod=d("100.50")), self.entry, self.universe)
@@ -124,24 +124,66 @@ class EntryTests(unittest.TestCase):
         return Position("NVDA", d("0.85"), d(avg), et(2026, 11, 30, 10), date(2026, 11, 30), d("8"), add_count=add_count)
 
     def test_add_allowed_on_dip(self):
-        evaluation = evaluate_add(self.position(), self.add, last_price=d("98.00"), rsi2=d("30"))
+        evaluation = evaluate_add(
+            self.position(), self.add, last_price=d("98.00"), rsi2=d("30"), atr_pct=d("1.0"),
+            now=et(2026, 11, 30, 12, 30),
+        )
         self.assertTrue(evaluation.allowed)
         self.assertEqual(evaluation.gap_pct, d("-2.0000"))
 
     def test_add_requires_minus_1_5_percent(self):
-        evaluation = evaluate_add(self.position(), self.add, last_price=d("99.00"), rsi2=d("30"))
+        evaluation = evaluate_add(
+            self.position(), self.add, last_price=d("99.00"), rsi2=d("30"), atr_pct=d("1.0"),
+            now=et(2026, 11, 30, 12, 30),
+        )
         self.assertFalse(evaluation.allowed)
         self.assertEqual(evaluation.reason, "no-add-dip")
 
     def test_add_only_once(self):
-        evaluation = evaluate_add(self.position(add_count=1), self.add, last_price=d("98.00"), rsi2=d("30"))
+        evaluation = evaluate_add(
+            self.position(add_count=1), self.add, last_price=d("98.00"), rsi2=d("30"), atr_pct=d("1.0"),
+            now=et(2026, 11, 30, 12, 30),
+        )
         self.assertFalse(evaluation.allowed)
         self.assertEqual(evaluation.reason, "max-adds")
 
     def test_add_rsi_limit(self):
-        evaluation = evaluate_add(self.position(), self.add, last_price=d("98.00"), rsi2=d("36"))
+        evaluation = evaluate_add(
+            self.position(), self.add, last_price=d("98.00"), rsi2=d("36"), atr_pct=d("1.0"),
+            now=et(2026, 11, 30, 12, 30),
+        )
         self.assertFalse(evaluation.allowed)
         self.assertEqual(evaluation.reason, "rsi-too-high")
+
+    def test_add_blocked_before_two_hours(self):
+        evaluation = evaluate_add(
+            self.position(), self.add, last_price=d("98.00"), rsi2=d("30"), atr_pct=d("1.0"),
+            now=et(2026, 11, 30, 10, 30),
+        )
+        self.assertFalse(evaluation.allowed)
+        self.assertEqual(evaluation.reason, "add-interval")
+
+    def test_add_interval_cleared_next_trading_day(self):
+        evaluation = evaluate_add(
+            self.position(), self.add, last_price=d("98.00"), rsi2=d("30"), atr_pct=d("1.0"),
+            now=et(2026, 12, 1, 10, 0),
+        )
+        self.assertTrue(evaluation.allowed, evaluation.reason)
+
+    def test_add_trigger_uses_atr_when_larger(self):
+        # ATR 3% -> 요구 하락 2.4%. -2.0% 면 부족하다.
+        evaluation = evaluate_add(
+            self.position(), self.add, last_price=d("98.00"), rsi2=d("30"), atr_pct=d("3.0"),
+            now=et(2026, 11, 30, 12, 30),
+        )
+        self.assertFalse(evaluation.allowed)
+        self.assertEqual(evaluation.reason, "no-add-dip")
+        self.assertEqual(evaluation.required_pct, d("2.4"))
+
+    def test_add_without_clock_fails_closed(self):
+        evaluation = evaluate_add(self.position(), self.add, last_price=d("98.00"), rsi2=d("30"))
+        self.assertFalse(evaluation.allowed)
+        self.assertEqual(evaluation.reason, "add-interval-unconfirmed")
 
     def test_drawdown_helper(self):
         self.assertEqual(drawdown_from_high(d("95"), d("100")), d("-5.0000"))

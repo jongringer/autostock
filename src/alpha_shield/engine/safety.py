@@ -1,6 +1,7 @@
 """엔진 안전장치 재노출 (실제 구현은 alpha_shield.safety)."""
 
 from ..safety import (
+    AccountKillSwitch,
     DailyRiskGuard,
     HaltSwitch,
     LiveOrdersDisabled,
@@ -16,4 +17,5 @@ __all__ = [
     "HaltSwitch",
     "OrderRateGuard",
     "DailyRiskGuard",
+    "AccountKillSwitch",
 ]

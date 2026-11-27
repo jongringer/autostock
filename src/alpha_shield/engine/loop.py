@@ -1,6 +1,12 @@
-"""매매 엔진 — 5분 사이클: (1) 매도 -> (2) 매수(신규·물타기).
+"""매매 엔진 — 5분 사이클.
+
+판단 우선순위(v3.3): **(1) 계좌 Kill Switch 점검 → (2) 매도 → (3) 매수(신규·물타기)**.
+  - 매도: 프리마켓 예약분 집행 → 손절(오버나잇은 09:32 ET 이후) · 익절 · 시간청산/트레일링
+          · 14:50~14:58 ET 선제 청산
+  - 매수: 시장·세션·이벤트·공시·뉴스·거시·데이터·계좌규정 가드 → Hark 2 점수 순위 → 빈 슬롯
 
 모든 판정 근거는 로그·JSONL·DB 에 남긴다. 매수는 fail-closed, 매도는 fail-open.
+단, 계좌 Kill Switch(Safe Halt)가 발동하면 신규 주문은 매도까지 전면 정지한다.
 """
 
 from __future__ import annotations
@@ -8,7 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -16,7 +22,8 @@ from typing import Callable, Mapping, Sequence
 from ..calendar import MarketCalendar, SessionEvaluation, SessionGuard
 from ..clock import Clock, SystemClock, et_date
 from ..config import GuardsConfig, StrategyConfig
-from ..guards.data import DataGuard
+from ..guards.account import AccountRegulationGuard
+from ..guards.data import DataGuard, TickGuard
 from ..guards.events import EarningsGuard
 from ..guards.filings import FilingsGuard
 from ..guards.macro import MacroGuard
@@ -38,11 +45,16 @@ from ..models import (
     Quote,
 )
 from ..numeric import ZERO, dec, qty6
-from ..safety import DailyRiskGuard, HaltSwitch, LiveOrdersDisabled, OrderRateGuard
+from ..safety import AccountKillSwitch, DailyRiskGuard, HaltSwitch, LiveOrdersDisabled, OrderRateGuard
 from ..state.repo import Repo
-from ..strategy.cooldown import CooldownBook
+from ..strategy.cooldown import REASON_STOP_LOSS_EOD, CooldownBook
 from ..strategy.entry import EntryEvaluation, SymbolInputs, evaluate_add, evaluate_entry
-from ..strategy.exit import evaluate_exit, hold_days, vix_take_profit_pct
+from ..strategy.exit import (
+    evaluate_exit,
+    hold_days,
+    preemptive_near_stop_pct,
+    vix_take_profit_pct,
+)
 from ..strategy.signals import SignalBook
 from ..strategy.sizing import Budget, plan_add, plan_new_entry, spendable_cash
 from ..strategy.slots import free_slots, rank_candidates
@@ -55,7 +67,16 @@ PURPOSE_BY_REASON = {
     "stop_loss": "s",
     "take_profit": "t",
     "time_exit": "x",
+    "time_exit_no_quote": "x",
+    "trailing_stop": "s",
+    "eod_preemptive_stop": "s",
+    "eod_preemptive_time_exit": "x",
 }
+
+STOP_FAMILY = ("stop_loss", "eod_preemptive_stop")
+MIN_QTY = Decimal("0.000001")
+KV_PREMARKET_QUEUE = "premarket_sell_queue"
+KV_CRASH_GUARD = "crash_guard"
 
 
 @dataclass(frozen=True)
@@ -88,6 +109,8 @@ class Engine:
         filings_provider=None,
         news_provider=None,
         macro_calendar=None,
+        allow_fractional_premarket_sell: bool = False,
+        tick_crosscheck: Callable[[str], Decimal | None] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.mode = mode
@@ -101,11 +124,15 @@ class Engine:
         self.alerter = alerter or Alerter(clock=self.clock.now)
         self.decision_log = decision_log or DecisionLog(None)
         self._sleep = sleep
+        self.allow_fractional_premarket_sell = bool(allow_fractional_premarket_sell)
+        self.tick_crosscheck = tick_crosscheck
 
         self.session_guard = SessionGuard(calendar, guards_config)
         self.market_guard = MarketGuard(market_data, guards_config.market)
         self.data_guard = DataGuard(guards_config.data)
+        self.tick_guard = TickGuard(guards_config.data)
         self.macro_guard = MacroGuard(macro_calendar, guards_config.macro)
+        self.account_guard = AccountRegulationGuard(repo, guards_config.account, calendar)
         self.earnings_guard = (
             EarningsGuard(earnings_provider, guards_config.events, calendar) if earnings_provider is not None else None
         )
@@ -117,6 +144,7 @@ class Engine:
         self.cooldowns = CooldownBook(repo, strategy.exit.cooldown_seconds)
         self.rate_guard = OrderRateGuard(repo, guards_config.risk)
         self.risk_guard = DailyRiskGuard(repo, guards_config.risk)
+        self.kill_switch = AccountKillSwitch(repo, guards_config.kill_switch)
         self.halt = HaltSwitch(halt_file) if halt_file is not None else None
         self._vix_value: Decimal | None = None
         self._vix_date: date | None = None
@@ -128,8 +156,10 @@ class Engine:
         today = et_date(now)
         try:
             account = self.broker.account()
+            self.kill_switch.note_api_success()
         except Exception as exc:  # noqa: BLE001
             self.alerter.notify("error", "계좌 조회 실패 — 매수 중단", error=str(exc))
+            self._note_api_failure(now, "bootstrap-account", exc)
             self.repo.kv_set_json(
                 "reconcile_state",
                 {"date": today.isoformat(), "ok": False, "mismatches": [f"account-error: {exc}"]},
@@ -160,6 +190,8 @@ class Engine:
         today = et_date(now)
         session = self.session_guard.evaluate(now)
         if not session.is_open:
+            if session.reason == "before-open":
+                return self._run_premarket(now, today, session)
             return self._finish(CycleReport(at=now, skipped=session.reason), session, {})
 
         positions = {position.symbol: position for position in self.repo.positions()}
@@ -169,8 +201,10 @@ class Engine:
         data_error: str | None = None
         try:
             quotes = dict(self.market_data.quotes(quote_symbols))
+            self.kill_switch.note_api_success()
         except Exception as exc:  # noqa: BLE001 - 시세 실패 -> 매수 보류
             data_error = str(exc)
+            self._note_api_failure(now, "quotes", exc)
             self.alerter.notify(
                 "error",
                 "시세 조회 실패 — 매수 보류. 보유 포지션은 가격 판정 불가로 시간청산만 시도합니다",
@@ -180,7 +214,9 @@ class Engine:
         try:
             self.broker.update_prices({symbol: quote.last_price for symbol, quote in quotes.items()})
             account = self.broker.account()
+            self.kill_switch.note_api_success()
         except Exception as exc:  # noqa: BLE001
+            self._note_api_failure(now, "account", exc)
             self.alerter.notify("error", "계좌 조회 실패 — 이번 사이클 건너뜀", error=str(exc))
             return self._finish(CycleReport(at=now, skipped="account-error"), session, {})
 
@@ -195,40 +231,51 @@ class Engine:
         report = CycleReport(at=now, equity_usd=equity, cash_usd=cash)
         blocked: list[str] = []
 
-        # ---------------------------------------------------------- (1) 매도
-        # 시세가 없어도 시간청산은 시도한다 (fail-open).
-        sells = self._process_exits(positions, quotes, session, now, today, blocked)
-        report = replace(report, sells=sells)
+        # ---------------------------------------------------------- (1) Kill Switch
+        if self._kill_switch_gate(now, today, equity, blocked):
+            report = replace(report, blocked=tuple(dict.fromkeys(blocked)))
+            return self._finish(report, session, {})
+
+        # ---------------------------------------------------------- (2) 매도
+        intraday_cache: dict[str, list[Bar]] = {}
+        sells: list[OrderResult] = list(
+            self._flush_premarket_queue(now, today, session, quotes, positions, blocked)
+        )
+        sells.extend(self._process_exits(positions, quotes, session, now, today, blocked, intraday_cache))
+        report = replace(report, sells=tuple(sells))
         if any(result.is_filled for result in sells):
             # 매도 대금이 반영된 잔고로 매수 예산을 다시 계산한다
             try:
                 account = self.broker.account()
                 equity, cash = account.equity_usd, account.cash_usd
+                self.kill_switch.note_api_success()
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("매도 후 잔고 재조회 실패: %s", exc)
 
-        # ---------------------------------------------------------- (2) 매수
-        daily: dict[str, list[Bar]] = {}
-        intraday: dict[str, list[Bar]] = {}
-        rsi_map: dict[str, Decimal | None] = {}
+        # ---------------------------------------------------------- (3) 매수
         inputs: dict[str, SymbolInputs] = {}
         evaluations: dict[str, EntryEvaluation] = {}
+        rsi_map: dict[str, Decimal | None] = {}
 
         allowed, extra_drawdown, gate_reasons = self._buy_gate(now, session, today, equity, data_error)
         blocked.extend(gate_reasons)
         if allowed:
+            crashed_today = self._crash_guard_symbols(today)
             for symbol in universe:
                 if symbol in positions:
                     continue
+                if symbol in crashed_today:
+                    blocked.append(f"{symbol}:abnormal-crash")
+                    continue
                 quote = quotes.get(symbol)
-                bars = self._daily_bars(symbol, daily)
+                bars = self._daily_bars(symbol, {})
                 check = self.data_guard.check(
                     symbol, quote, bars, now, sma_period=self.strategy.entry.sma_period
                 )
                 if not check.allowed:
                     blocked.append(f"{symbol}:{check.reason}")
                     continue
-                snapshot = self._build_inputs(symbol, quote, bars, intraday)
+                snapshot = self._build_inputs(symbol, quote, bars, intraday_cache)
                 inputs[symbol] = snapshot
                 rsi_map[symbol] = snapshot.rsi2
                 evaluation = evaluate_entry(
@@ -238,6 +285,8 @@ class Engine:
                     extra_drawdown_pct=extra_drawdown,
                 )
                 evaluations[symbol] = evaluation
+                if evaluation.abnormal_crash:
+                    self._note_crash_guard(symbol, today)
                 if not evaluation.allowed:
                     blocked.append(f"{symbol}:{evaluation.reason}")
                     continue
@@ -275,6 +324,213 @@ class Engine:
         self._log_decisions(report, session, inputs, evaluations, quotes)
         return self._finish(report, session, {})
 
+    # ================================================================== 계좌 Kill Switch
+    def _kill_switch_gate(self, now: datetime, today: date, equity: Decimal, blocked: list[str]) -> bool:
+        """발동 중이면 True — 신규 주문(매수·매도) 전면 정지."""
+        if self.kill_switch.active:
+            blocked.append(f"kill-switch:{self.kill_switch.reason()}")
+            return True
+
+        day = self.repo.day_state(today)
+        tripped = self.kill_switch.check_daily_loss(equity, day.equity_open if day is not None else None, now)
+        if tripped:
+            blocked.append("risk:daily-loss-limit")
+        if self.kill_switch.observe_equity(equity, now):
+            tripped = True
+        if self._mismatch_today(today):
+            state = self.repo.kv_get_json("reconcile_state") or {}
+            mismatches = state.get("mismatches") if isinstance(state, dict) else None
+            if self.kill_switch.check_mismatch(mismatches, now):
+                tripped = True
+                blocked.append("reconcile-mismatch")
+
+        if not self.kill_switch.active:
+            return False
+        if tripped:
+            self.alerter.notify(
+                "error",
+                "계좌 Kill Switch 발동 — 신규 주문 전면 정지(Safe Halt). 원인 확인 후 수동 해제하세요",
+                reason=self.kill_switch.reason(),
+                detail=dict(self.kill_switch.detail()),
+                peak_equity=self.kill_switch.peak_equity(),
+                mdd_pct=self.kill_switch.mdd_pct(),
+            )
+        blocked.append(f"kill-switch:{self.kill_switch.reason()}")
+        return True
+
+    def _note_api_failure(self, now: datetime, label: str, exc: Exception) -> None:
+        if self.kill_switch.note_api_error(now):
+            self.alerter.notify(
+                "error",
+                "API 연속 오류 — 계좌 Kill Switch 발동(Safe Halt)",
+                label=label,
+                error=str(exc),
+                streak=self.kill_switch.api_error_streak(),
+            )
+
+    # ================================================================== 프리마켓
+    def _run_premarket(self, now: datetime, today: date, session: SessionEvaluation) -> CycleReport:
+        """개장 전 프리마켓 — 소수점 매도 지원 여부에 따라 즉시 매도 또는 09:30~09:32 예약 큐."""
+        positions = {position.symbol: position for position in self.repo.positions()}
+        report = CycleReport(at=now, skipped=session.reason)
+        if not positions:
+            return self._finish(report, session, {})
+        if self.kill_switch.active:
+            return self._finish(
+                replace(report, blocked=(f"kill-switch:{self.kill_switch.reason()}",)), session, {}
+            )
+        quotes: dict[str, Quote] = {}
+        try:
+            quotes = dict(self.market_data.quotes(sorted(positions)))
+            self.kill_switch.note_api_success()
+        except Exception as exc:  # noqa: BLE001
+            self._note_api_failure(now, "premarket-quotes", exc)
+            self.alerter.notify("error", "개장 전 시세 조회 실패 — 예약 매도 판정 불가", error=str(exc))
+            return self._finish(report, session, {})
+
+        blocked: list[str] = []
+        intraday: dict[str, list[Bar]] = {}
+        if self.allow_fractional_premarket_sell:
+            sells = self._process_exits(
+                positions, quotes, session, now, today, blocked, intraday, premarket=True
+            )
+            report = replace(report, sells=tuple(sells), blocked=tuple(dict.fromkeys(blocked)))
+        else:
+            queued = self._queue_premarket_exits(positions, quotes, now, today)
+            report = replace(
+                report,
+                blocked=tuple(dict.fromkeys(blocked)),
+                notes=tuple(f"premarket-queued:{symbol}" for symbol in queued),
+            )
+        return self._finish(report, session, {})
+
+    def _premarket_queue(self) -> list[dict[str, object]]:
+        raw = self.repo.kv_get_json(KV_PREMARKET_QUEUE)
+        return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+    def _save_premarket_queue(self, queue: Sequence[Mapping[str, object]]) -> None:
+        self.repo.kv_set_json(KV_PREMARKET_QUEUE, [dict(item) for item in queue])
+
+    def _queue_premarket_exits(
+        self,
+        positions: Mapping[str, Position],
+        quotes: Mapping[str, Quote],
+        now: datetime,
+        today: date,
+    ) -> list[str]:
+        queue = self._premarket_queue()
+        known = {str(item.get("symbol")) for item in queue}
+        queued: list[str] = []
+        for symbol in sorted(positions):
+            position = positions[symbol]
+            quote = quotes.get(symbol)
+            if quote is None:
+                continue
+            trading_days, calendar_days = hold_days(position, today, self.calendar)
+            evaluation = evaluate_exit(
+                position,
+                quote.last_price,
+                self.strategy.exit,
+                trading_days_held=trading_days,
+                calendar_days_held=calendar_days,
+                trail_high=self._trail_high(symbol),
+            )
+            if not evaluation.should_exit or symbol in known:
+                continue
+            queue.append(
+                {
+                    "symbol": symbol,
+                    "reason": evaluation.reason,
+                    "pct": str(evaluation.pct),
+                    "queued_at": now.isoformat(),
+                    "queue_date": today.isoformat(),
+                }
+            )
+            queued.append(symbol)
+            self.alerter.notify(
+                "warning",
+                "프리마켓 매도 신호 — 09:30~09:32 ET 예약 매도 큐에 등록했습니다",
+                symbol=symbol,
+                reason=evaluation.reason,
+                pct=str(evaluation.pct),
+                allow_fractional_premarket_sell=False,
+            )
+        self._save_premarket_queue(queue)
+        return queued
+
+    def _flush_premarket_queue(
+        self,
+        now: datetime,
+        today: date,
+        session: SessionEvaluation,
+        quotes: Mapping[str, Quote],
+        positions: Mapping[str, Position],
+        blocked: list[str],
+    ) -> tuple[OrderResult, ...]:
+        queue = self._premarket_queue()
+        if not queue:
+            return ()
+        window = session.window
+        cfg = self.guards_config.session
+        in_window = window is not None and window.premarket_flush_allowed(now, cfg.premarket_flush_min)
+        if not in_window:
+            if window is not None and now >= window.regular_start + timedelta(minutes=cfg.premarket_flush_min):
+                self.alerter.notify(
+                    "warning",
+                    "프리마켓 예약 매도의 집행 창(09:30~09:32 ET)을 놓쳤습니다 — 수동 확인이 필요합니다",
+                    symbols=[item.get("symbol") for item in queue],
+                )
+                blocked.append("premarket-queue-missed")
+                self._save_premarket_queue([])
+            return ()
+
+        results: list[OrderResult] = []
+        remaining: list[dict[str, object]] = []
+        for item in queue:
+            symbol = str(item.get("symbol"))
+            position = positions.get(symbol)
+            quote = quotes.get(symbol)
+            if position is None:
+                continue
+            if quote is None:
+                remaining.append(item)
+                blocked.append(f"{symbol}:quote-missing")
+                continue
+            reason = str(item.get("reason") or "take_profit")
+            if not session.fractional_sell_allowed:
+                remaining.append(item)
+                blocked.append(f"{symbol}:sell-window-closed")
+                continue
+            gate = self.rate_guard.check(symbol, "SELL", now)
+            if not gate.allowed:
+                remaining.append(item)
+                blocked.append(f"{symbol}:{gate.reason}")
+                continue
+            request = OrderRequest(
+                symbol=symbol,
+                side="SELL",
+                client_order_id=self._next_order_id(symbol, PURPOSE_BY_REASON.get(reason, "x"), today),
+                qty=qty6(position.qty),
+                reason=reason,
+                ref_price=quote.last_price,
+            )
+            result = self._execute(request, now)
+            results.append(result)
+            if result.status in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL) and result.filled_qty > ZERO:
+                self._apply_sell(position, result, now, today, reason)
+                self.alerter.notify(
+                    "info",
+                    "프리마켓 예약 매도 집행",
+                    symbol=symbol,
+                    reason=reason,
+                    qty=str(result.filled_qty),
+                    price=str(result.avg_price),
+                )
+            else:
+                blocked.append(f"{symbol}:queued-sell-rejected:{result.error_code}")
+        self._save_premarket_queue(remaining)
+        return tuple(results)
+
     # ================================================================== 미체결 동기화
     def _sync_pending_orders(self, now: datetime, today: date) -> None:
         """이전 사이클에 PENDING/PARTIAL 로 남은 주문의 체결분을 원장에 반영한다."""
@@ -283,8 +539,10 @@ class Engine:
                 continue
             try:
                 result = self.broker.get_order(record.broker_order_id)
+                self.kill_switch.note_api_success()
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("미체결 주문 조회 실패 %s: %s", record.broker_order_id, exc)
+                self._note_api_failure(now, "order-sync", exc)
                 continue
             if result is None:
                 continue
@@ -305,7 +563,7 @@ class Engine:
             else:
                 position = self.repo.position(record.symbol)
                 if position is not None:
-                    self._apply_sell_delta(position, delta, now)
+                    self._apply_sell_delta(position, delta, now, today, record.reason)
             self.alerter.notify(
                 "warning",
                 "미체결 주문 체결 동기화",
@@ -356,11 +614,12 @@ class Engine:
                 )
             )
 
-    def _apply_sell_delta(self, position: Position, delta: Decimal, now: datetime) -> None:
+    def _apply_sell_delta(self, position: Position, delta: Decimal, now: datetime, today: date, reason: str) -> None:
         remaining = position.qty - delta
-        if remaining <= Decimal("0.000001"):
+        if remaining <= MIN_QTY:
             self.repo.delete_position(position.symbol)
-            self.cooldowns.block(position.symbol, now, "exit")
+            self._clear_trail(position.symbol)
+            self._set_exit_cooldown(position.symbol, position, now, today, reason)
         else:
             self.repo.save_position(replace(position, qty=remaining))
 
@@ -373,8 +632,13 @@ class Engine:
         now: datetime,
         today: date,
         blocked: list[str],
+        intraday_cache: dict[str, list[Bar]],
+        *,
+        premarket: bool = False,
     ) -> tuple[OrderResult, ...]:
         results: list[OrderResult] = []
+        window = session.window
+        open_cfg = self.guards_config.session
         for symbol in sorted(positions):
             position = positions[symbol]
             quote = quotes.get(symbol)
@@ -388,7 +652,7 @@ class Engine:
                     blocked.append(f"{symbol}:quote-missing-exit-skipped")
                     continue
                 # 가격 판정은 불가하지만 시간청산은 강제한다 (시장가 매도)
-                if not session.fractional_sell_allowed:
+                if not (session.fractional_sell_allowed or premarket):
                     blocked.append(f"{symbol}:sell-window-closed")
                     continue
                 gate = self.rate_guard.check(symbol, "SELL", now)
@@ -406,8 +670,8 @@ class Engine:
                 result = self._execute(request, now)
                 results.append(result)
                 if result.status in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL) and result.filled_qty > ZERO:
-                    self._apply_sell(position, result, now)
-                    if position.qty - result.filled_qty <= Decimal("0.000001"):
+                    self._apply_sell(position, result, now, today, "time_exit")
+                    if position.qty - result.filled_qty <= MIN_QTY:
                         positions.pop(symbol, None)
                     self.alerter.notify(
                         "warning",
@@ -419,49 +683,95 @@ class Engine:
                 else:
                     blocked.append(f"{symbol}:time-exit-rejected:{result.error_code}")
                 continue
+
+            price = quote.last_price
+            trail_high = self._trail_high(symbol)
             evaluation = evaluate_exit(
                 position,
-                quote.last_price,
+                price,
                 self.strategy.exit,
                 trading_days_held=trading_days,
                 calendar_days_held=calendar_days,
+                trail_high=trail_high,
             )
-            if not evaluation.should_exit:
+
+            if evaluation.arm_trailing:
+                self._set_trail_high(symbol, max(price, trail_high or ZERO))
+                blocked.append(f"{symbol}:trailing-armed")
+                self.alerter.notify(
+                    "info",
+                    "시간청산 만기 — 상승 추세라 트레일링(-2.0%)으로 전환했습니다",
+                    symbol=symbol,
+                    pct=str(evaluation.pct),
+                    high=str(price),
+                )
                 continue
-            if not session.fractional_sell_allowed:
+            if trail_high is not None and price > trail_high:
+                self._set_trail_high(symbol, price)
+
+            if evaluation.should_exit:
+                reason = evaluation.reason
+                if reason == "time_exit" and self._in_preemptive_window(session, now):
+                    reason = "eod_preemptive_time_exit"
+            else:
+                reason = self._preemptive_reason(position, evaluation.pct, session, now, trading_days, calendar_days)
+                if reason is None:
+                    continue
+
+            if reason in STOP_FAMILY and position.first_entry_date < today and not premarket:
+                if window is not None and not window.overnight_stop_allowed(now, open_cfg.overnight_stop_after_open_min):
+                    blocked.append(f"{symbol}:overnight-stop-deferred")
+                    continue
+
+            if not (session.fractional_sell_allowed or premarket):
                 self.alerter.notify(
                     "error",
                     "청산 신호가 났지만 소수점 매도 마감(15:00 ET) 이후입니다 — 다음 거래일로 이월됩니다",
                     symbol=symbol,
-                    reason=evaluation.reason,
+                    reason=reason,
                     pct=str(evaluation.pct),
                 )
                 blocked.append(f"{symbol}:sell-window-closed")
                 continue
+
+            tick = self._tick_guard_check(symbol, price, now, intraday_cache)
+            if not tick.allowed:
+                detail = {key: value for key, value in dict(tick.detail).items() if key != "symbol"}
+                self.alerter.notify(
+                    "warning",
+                    "이상 틱 가드 발동 — 보조 시세가 확인되지 않아 매도를 보류했습니다(가짜 손절 차단)",
+                    symbol=symbol,
+                    reason=tick.reason,
+                    price=str(price),
+                    **detail,
+                )
+                blocked.append(f"{symbol}:{tick.reason}")
+                continue
+
             gate = self.rate_guard.check(symbol, "SELL", now)
             if not gate.allowed:
                 blocked.append(f"{symbol}:{gate.reason}")
                 continue
-            purpose = PURPOSE_BY_REASON.get(evaluation.reason, "x")
+            purpose = PURPOSE_BY_REASON.get(reason, "x")
             request = OrderRequest(
                 symbol=symbol,
                 side="SELL",
                 client_order_id=self._next_order_id(symbol, purpose, today),
                 qty=qty6(position.qty),
-                reason=evaluation.reason,
-                ref_price=quote.last_price,
+                reason=reason,
+                ref_price=price,
             )
             result = self._execute(request, now)
             results.append(result)
             if result.status in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL) and result.filled_qty > ZERO:
-                self._apply_sell(position, result, now)
-                if position.qty - result.filled_qty <= Decimal("0.000001"):
+                self._apply_sell(position, result, now, today, reason)
+                if position.qty - result.filled_qty <= MIN_QTY:
                     positions.pop(symbol, None)
                 self.alerter.notify(
                     "info",
                     "청산 체결",
                     symbol=symbol,
-                    reason=evaluation.reason,
+                    reason=reason,
                     pct=str(evaluation.pct),
                     qty=str(result.filled_qty),
                     price=str(result.avg_price),
@@ -476,13 +786,109 @@ class Engine:
                 )
         return tuple(results)
 
-    def _apply_sell(self, position: Position, result: OrderResult, now: datetime) -> None:
+    def _in_preemptive_window(self, session: SessionEvaluation, now: datetime) -> bool:
+        window = session.window
+        if window is None:
+            return False
+        cfg = self.guards_config.session
+        return window.in_preemptive_window(
+            now, cfg.fractional_close_buffer_min, cfg.preemptive_start_min, cfg.preemptive_end_min
+        )
+
+    def _preemptive_reason(
+        self,
+        position: Position,
+        pct: Decimal,
+        session: SessionEvaluation,
+        now: datetime,
+        trading_days: int,
+        calendar_days: int,
+    ) -> str | None:
+        """14:50~14:58 ET 선제 청산 — 근접 손절 / 만기 종목."""
+        if not self._in_preemptive_window(session, now):
+            return None
+        near = preemptive_near_stop_pct(position, self.strategy.exit)
+        if pct <= -near:
+            return "eod_preemptive_stop"
+        if (
+            trading_days >= self.strategy.exit.time_exit_trading_days
+            or calendar_days >= self.strategy.exit.time_exit_calendar_days
+        ):
+            return "eod_preemptive_time_exit"
+        return None
+
+    def _tick_guard_check(
+        self, symbol: str, price: Decimal, now: datetime, intraday_cache: dict[str, list[Bar]]
+    ) -> GuardDecision:
+        bars = intraday_cache.get(symbol)
+        if bars is None:
+            try:
+                bars = list(self.market_data.intraday_bars(symbol, minutes=60))
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("1분봉 조회 실패 %s: %s", symbol, exc)
+                bars = []
+            intraday_cache[symbol] = bars
+        crosscheck = None
+        if self.tick_crosscheck is not None:
+            crosscheck = self._crosscheck_price
+        return self.tick_guard.check(symbol, price, bars, now, crosscheck)
+
+    def _crosscheck_price(self, symbol: str) -> Decimal | None:
+        if self.tick_crosscheck is None:
+            return None
+        try:
+            return self.tick_crosscheck(symbol)
+        except Exception:  # noqa: BLE001 - 보조 소스 실패는 미확인
+            return None
+
+    def _trail_high(self, symbol: str) -> Decimal | None:
+        value = self.repo.kv_get_json(f"trail:{symbol}")
+        if not isinstance(value, dict):
+            return None
+        raw = value.get("high")
+        return None if raw is None else dec(raw)
+
+    def _set_trail_high(self, symbol: str, high: Decimal) -> None:
+        self.repo.kv_set_json(f"trail:{symbol}", {"high": str(high)})
+
+    def _clear_trail(self, symbol: str) -> None:
+        self.repo.kv_set_json(f"trail:{symbol}", {})
+
+    def _apply_sell(
+        self, position: Position, result: OrderResult, now: datetime, today: date, reason: str = "exit"
+    ) -> None:
         remaining = position.qty - result.filled_qty
-        if remaining <= Decimal("0.000001"):
+        if remaining <= MIN_QTY:
             self.repo.delete_position(position.symbol)
-            self.cooldowns.block(position.symbol, now, "exit")
+            self._clear_trail(position.symbol)
+            self._set_exit_cooldown(position.symbol, position, now, today, reason)
+            if position.first_entry_date == today:
+                # 당일 매수 후 당일 매도 = 데이트레이드
+                self.account_guard.record_day_trade(position.symbol, today, now)
         else:
             self.repo.save_position(replace(position, qty=remaining))
+        if result.filled_qty > ZERO:
+            proceeds = (result.filled_amount or ZERO) - result.commission - result.tax
+            self.account_guard.record_sell(position.symbol, proceeds, today)
+
+    def _set_exit_cooldown(
+        self, symbol: str, position: Position, now: datetime, today: date, reason: str
+    ) -> None:
+        cfg = self.strategy.exit
+        if reason in STOP_FAMILY and cfg.stop_loss_eod_cooldown:
+            window = self.calendar.session_on(today)
+            until = window.regular_end if window is not None else now + timedelta(seconds=cfg.cooldown_seconds)
+            if until <= now:
+                until = now + timedelta(seconds=cfg.cooldown_seconds)
+            self.cooldowns.block_until(symbol, until, REASON_STOP_LOSS_EOD)
+            self.alerter.notify(
+                "warning",
+                "손절 후 당일 재진입 금지(EOD 쿨다운) — 다음 거래일에 해제됩니다",
+                symbol=symbol,
+                until=until.isoformat(),
+            )
+        else:
+            self.cooldowns.block(symbol, now, "exit")
 
     # ================================================================== 매수
     def _buy_gate(
@@ -505,6 +911,9 @@ class Engine:
         risk = self.risk_guard.check(today, equity, now)
         if not risk.allowed:
             reasons.append(f"risk:{risk.reason}")
+        pdt = self.account_guard.pdt_status(today, equity)
+        if not pdt.allowed:
+            reasons.append(f"account:{pdt.reason}")
         market = self.market_guard.check()
         if not market.allowed:
             reasons.append(f"market:{market.reason}")
@@ -521,7 +930,7 @@ class Engine:
         valid_signals: Mapping[str, object],
         account: AccountState,
         quotes: Mapping[str, Quote],
-        positions: Mapping[str, Position],
+        positions: dict[str, Position],
         now: datetime,
         today: date,
         blocked: list[str],
@@ -529,7 +938,9 @@ class Engine:
         if not candidates and not positions:
             return ()
         equity, cash = account.equity_usd, account.cash_usd
-        budget = Budget(spendable_cash(equity, cash, self.strategy.capital))
+        # 현금 계좌는 미결제 매도대금(T+1)을 뺀 결제 완료 현금만 쓴다 (GFV 방지)
+        settled = self.account_guard.settled_cash(cash, today)
+        budget = Budget(spendable_cash(equity, settled, self.strategy.capital))
         results: list[OrderResult] = []
 
         # 물타기: 보유 종목이 대상 (슬롯을 추가로 쓰지 않는다)
@@ -541,8 +952,17 @@ class Engine:
                 continue
             daily = self._daily_bars(symbol, {})
             rsi = wilder_rsi([bar.close for bar in daily], self.strategy.entry.rsi_period) if daily else None
-            evaluation = evaluate_add(position, self.strategy.add, last_price=quote.last_price, rsi2=rsi)
+            atr = atr_pct(daily, self.strategy.entry.atr_period) if daily else None
+            evaluation = evaluate_add(
+                position,
+                self.strategy.add,
+                last_price=quote.last_price,
+                rsi2=rsi,
+                atr_pct=atr,
+                now=now,
+            )
             if not evaluation.allowed:
+                blocked.append(f"{symbol}:add-{evaluation.reason}")
                 continue
             if self.cooldowns.is_blocked(symbol, now):
                 blocked.append(f"{symbol}:cooldown")
@@ -551,10 +971,17 @@ class Engine:
             if not gate.allowed:
                 blocked.append(f"{symbol}:{gate.reason}")
                 continue
-            amount = plan_add(position, quote.last_price, equity, cash, self.strategy.capital, budget)
+            amount = plan_add(position, quote.last_price, equity, settled, self.strategy.capital, budget)
             if amount is None:
                 blocked.append(f"{symbol}:add-cap-or-min-order")
                 continue
+            duplicate = self.kill_switch.note_order_attempt(symbol, "BUY", now)
+            if not duplicate.allowed:
+                blocked.append(f"{symbol}:{duplicate.reason}")
+                self.alerter.notify(
+                    "error", "5분 내 동일 종목 중복 주문 시도 — 계좌 Kill Switch 발동", symbol=symbol, side="BUY"
+                )
+                break
             request = OrderRequest(
                 symbol=symbol,
                 side="BUY",
@@ -569,6 +996,7 @@ class Engine:
                 updated = self._apply_add(position, result, now)
                 positions[symbol] = updated
                 cash = self._cash_after(cash, result, amount)
+                settled = self.account_guard.settled_cash(cash, today)
                 self.alerter.notify(
                     "info", "물타기 체결", symbol=symbol, amount=str(amount), qty=str(result.filled_qty),
                     price=str(result.avg_price), add_count=position.add_count + 1,
@@ -584,7 +1012,11 @@ class Engine:
                 break
             symbol = evaluation.symbol
             if self.cooldowns.is_blocked(symbol, now):
-                blocked.append(f"{symbol}:cooldown")
+                reason = self.cooldowns.reason(symbol) or "exit"
+                blocked.append(f"{symbol}:cooldown-{reason}")
+                continue
+            if self.account_guard.rebuy_blocked(symbol, today):
+                blocked.append(f"{symbol}:gfv-unsettled-funds")
                 continue
             quote = quotes.get(symbol)
             if quote is None:
@@ -594,9 +1026,16 @@ class Engine:
             if not gate.allowed:
                 blocked.append(f"{symbol}:{gate.reason}")
                 continue
-            amount = plan_new_entry(equity, cash, self.strategy.capital, budget)
+            amount = plan_new_entry(equity, settled, self.strategy.capital, budget)
             if amount is None:
                 blocked.append(f"{symbol}:no-cash-or-min-order")
+                break
+            duplicate = self.kill_switch.note_order_attempt(symbol, "BUY", now)
+            if not duplicate.allowed:
+                blocked.append(f"{symbol}:{duplicate.reason}")
+                self.alerter.notify(
+                    "error", "5분 내 동일 종목 중복 주문 시도 — 계좌 Kill Switch 발동", symbol=symbol, side="BUY"
+                )
                 break
             request = OrderRequest(
                 symbol=symbol,
@@ -611,6 +1050,7 @@ class Engine:
             if result.status in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL) and result.filled_qty > ZERO:
                 self._open_position(symbol, result, now, today)
                 cash = self._cash_after(cash, result, amount)
+                settled = self.account_guard.settled_cash(cash, today)
                 slots -= 1
                 signal = valid_signals.get(symbol)
                 if signal is not None:
@@ -647,6 +1087,7 @@ class Engine:
             add_count=0,
         )
         self.repo.save_position(position)
+        self._clear_trail(symbol)
         LOG.info(
             "포지션 개설 %s qty=%s avg=%s VIX=%s 목표익절=%s%%",
             symbol, position.qty, position.avg_price, vix, target,
@@ -683,6 +1124,25 @@ class Engine:
             if not decision.allowed:
                 return decision
         return GuardDecision.ok()
+
+    def _crash_guard_symbols(self, today: date) -> set[str]:
+        state = self.repo.kv_get_json(KV_CRASH_GUARD)
+        if not isinstance(state, dict) or state.get("date") != today.isoformat():
+            return set()
+        return {str(symbol) for symbol in state.get("symbols") or []}
+
+    def _note_crash_guard(self, symbol: str, today: date) -> None:
+        symbols = self._crash_guard_symbols(today)
+        if symbol in symbols:
+            return
+        symbols.add(symbol)
+        self.repo.kv_set_json(KV_CRASH_GUARD, {"date": today.isoformat(), "symbols": sorted(symbols)})
+        self.alerter.notify(
+            "warning",
+            "비정상 급락 가드 — 당일 신규 매수 대상에서 제외했습니다",
+            symbol=symbol,
+            rule="장중 고점 대비 -3.0 x ATR(20)% 초과",
+        )
 
     def _build_inputs(
         self,
@@ -758,6 +1218,7 @@ class Engine:
             )
         try:
             result = self.broker.place_order(request)
+            self.kill_switch.note_api_success()
         except LiveOrdersDisabled:
             raise
         except Exception as exc:  # noqa: BLE001 - 브로커 오류는 주문 거부로 기록
@@ -770,6 +1231,8 @@ class Engine:
                 filled_at=now,
             )
             self.alerter.notify("error", "주문 실패", symbol=request.symbol, side=request.side, code=code, message=str(exc))
+            if code == "broker-error":
+                self._note_api_failure(now, "order", exc)
         self.repo.record_order(request, result, mode=self.mode, created_at=now)
         return result
 
@@ -837,6 +1300,7 @@ class Engine:
             "equity_usd": str(report.equity_usd),
             "cash_usd": str(report.cash_usd),
             "blocked": list(report.blocked),
+            "kill_switch": self.kill_switch.describe(),
             "quotes": {
                 symbol: {"last": str(quote.last_price), "ts": None if quote.timestamp is None else quote.timestamp.isoformat()}
                 for symbol, quote in quotes.items()

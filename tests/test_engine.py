@@ -98,11 +98,11 @@ class EnginePaperTests(unittest.TestCase):
         self.assertEqual(report.buys[0].status, ORDER_STATUS_FILLED)
         position = self.h.repo.position("NVDA")
         self.assertIsNotNone(position)
-        self.assertEqual(position.qty, d("0.885416"))  # 85 / 96, 소수 6자리 내림
+        self.assertEqual(position.qty, d("0.781250"))  # 75 / 96 (v3.3 $400 미만 구간), 소수 6자리 내림
         self.assertEqual(position.avg_price, d("96"))
         self.assertEqual(position.tp_target_pct, d("8.0"))  # VIX 15.5 < 18
         self.assertEqual(position.entry_vix, d("15.5"))
-        self.assertEqual(self.h.broker.account().cash_usd.quantize(d("0.01")), d("295.00"))
+        self.assertEqual(self.h.broker.account().cash_usd.quantize(d("0.01")), d("305.00"))
         records = self.h.orders()
         self.assertEqual(records[0].side, "BUY")
         self.assertEqual(records[0].status, "FILLED")
@@ -111,8 +111,8 @@ class EnginePaperTests(unittest.TestCase):
         day = self.h.now.date()
         # TSLA: 더 깊은 낙폭(-6%) -> 점수 우위, NVDA 는 -4.5%
         self.h.md.set_daily("TSLA", make_daily(falling_closes(), last_day=date(2026, 11, 30)))
-        self.h.md.set_intraday("TSLA", make_intraday([100.0], 94, day=day))
-        self.h.md.set_quote("TSLA", 94, at=self.h.now - timedelta(seconds=10))
+        self.h.md.set_intraday("TSLA", make_intraday([100.0], 96, day=day))
+        self.h.md.set_quote("TSLA", 96, at=self.h.now - timedelta(seconds=10))
         report = self.h.cycle()
         self.assertEqual(len([r for r in report.buys if r.status == ORDER_STATUS_FILLED]), 2)
         self.assertEqual(self.h.repo.position("TSLA").symbol, "TSLA")
@@ -163,7 +163,7 @@ class EnginePaperTests(unittest.TestCase):
         self.h.cycle()
         position = self.h.repo.position("NVDA")
         self.assertEqual(position.add_count, 0)
-        self.h.clock.advance(300)
+        self.h.clock.advance(2 * 60 * 60)  # v3.3: 1차 진입 후 최소 2시간 경과
         # 평단 96 대비 -2% (94.08), RSI(2) 는 여전히 낮아야 한다
         closes = falling_closes()
         closes[-1] = d("94.08")

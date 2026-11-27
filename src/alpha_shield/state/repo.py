@@ -193,6 +193,10 @@ class Repo:
         row = self.conn.execute("SELECT until_at FROM cooldowns WHERE symbol=?", (symbol,)).fetchone()
         return None if row is None else datetime.fromisoformat(row["until_at"])
 
+    def cooldown_reason(self, symbol: str) -> str | None:
+        row = self.conn.execute("SELECT reason FROM cooldowns WHERE symbol=?", (symbol,)).fetchone()
+        return None if row is None else row["reason"]
+
     def clear_cooldown(self, symbol: str) -> None:
         self.conn.execute("DELETE FROM cooldowns WHERE symbol=?", (symbol,))
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=ALPHA SHIELD v3.2 (Toss Securities US fractional auto-trader)
+Description=ALPHA SHIELD v3.3 (Toss Securities US fractional auto-trader)
 Documentation=file:///opt/autostock/README.md
 After=network-online.target
 Wants=network-online.target

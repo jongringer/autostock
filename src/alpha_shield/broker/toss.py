@@ -49,6 +49,7 @@ class TossBroker:
         min_order_usd: Decimal = Decimal("10.00"),
         session_provider: Callable[[datetime], object | None] | None = None,
         fractional_close_buffer_min: int = 60,
+        allow_fractional_premarket_sell: bool = False,
         clock: Callable[[], datetime] = now_et,
         sleep: Callable[[float], None] = time.sleep,
         fill_poll_attempts: int = 2,
@@ -59,6 +60,7 @@ class TossBroker:
         self.min_order_usd = min_order_usd
         self.session_provider = session_provider
         self.fractional_close_buffer_min = fractional_close_buffer_min
+        self.allow_fractional_premarket_sell = allow_fractional_premarket_sell
         self._clock = clock
         self._sleep = sleep
         self.fill_poll_attempts = fill_poll_attempts
@@ -96,7 +98,7 @@ class TossBroker:
         )
 
     # ------------------------------------------------------------------ 주문
-    def _assert_fractional_window(self, now: datetime) -> None:
+    def _assert_fractional_window(self, now: datetime, side: str = "BUY") -> None:
         if self.session_provider is None:
             return
         try:
@@ -105,11 +107,15 @@ class TossBroker:
             raise OrderRejected("session-unavailable", f"세션 확인 실패: {exc}") from exc
         if window is None:
             raise OrderRejected("order-hours-closed", "휴장일에는 주문할 수 없습니다")
-        if not window.fractional_sell_allowed(now, self.fractional_close_buffer_min):
-            raise OrderRejected(
-                "amount-order-outside-regular-hours",
-                "금액·소수점 주문은 정규장 시작 ~ 종료 1시간 전(15:00 ET)까지만 접수됩니다",
-            )
+        if window.fractional_sell_allowed(now, self.fractional_close_buffer_min):
+            return
+        if side == "SELL" and self.allow_fractional_premarket_sell and window.is_premarket(now):
+            # ALLOW_FRACTIONAL_PREMARKET_SELL=true — 프리마켓 소수점 매도를 허용한다.
+            return
+        raise OrderRejected(
+            "amount-order-outside-regular-hours",
+            "금액·소수점 주문은 정규장 시작 ~ 종료 1시간 전(15:00 ET)까지만 접수됩니다",
+        )
 
     def _build_payload(self, request: OrderRequest) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -120,7 +126,7 @@ class TossBroker:
         }
         if request.side == "BUY":
             if request.amount_usd is None:
-                raise OrderRejected("invalid-request", "v3.2 매수는 금액(orderAmount) 기반입니다")
+                raise OrderRejected("invalid-request", "v3.3 매수는 금액(orderAmount) 기반입니다")
             amount = money_down(request.amount_usd)
             if amount < self.min_order_usd:
                 raise OrderRejected("min-order-amount", f"최소 주문 금액 ${self.min_order_usd} 미만입니다")
@@ -135,7 +141,7 @@ class TossBroker:
         self.safety.assert_live()
         now = self._clock()
         try:
-            self._assert_fractional_window(now)
+            self._assert_fractional_window(now, request.side)
             payload = self._build_payload(request)
         except OrderRejected as exc:
             LOG.warning("토스 주문 사전 검증 거부 %s: %s", exc.code, exc.message)

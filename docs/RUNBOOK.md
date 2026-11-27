@@ -1,4 +1,4 @@
-# ALPHA SHIELD v3.2 운영 런북
+# ALPHA SHIELD v3.3 운영 런북
 
 ## 0. 일일 점검 (장 시작 전, 한국 시간 22:30 전후)
 
@@ -23,6 +23,7 @@ tail -n 30 logs/alpha-shield.log
 | 실주문 즉시 중단 | `rm state/ARMED` (이미 낸 주문은 취소되지 않음) |
 | 신규 매수만 중단 | `touch state/halt.flag` (청산은 계속) |
 | 정지 해제 | `rm state/halt.flag` |
+| 계좌 Kill Switch 해제 | 대시보드 `킬스위치 OFF`(state kv `kill_switch` 초기화) — 원인 확인 후에만 |
 
 ## 2. 알림 대응
 
@@ -35,7 +36,12 @@ tail -n 30 logs/alpha-shield.log
 | `청산 신호가 났지만 소수점 매도 마감 이후` | 15:00~16:00 ET 에 청산 신호 발생 | 다음 거래일 개장 직후 청산. 손실 확대 가능성 인지 |
 | `시세 조회 실패` | Yahoo/토스 장애 | 매수는 자동 중단. 매도는 가격을 못 받아 지연될 수 있음 |
 | `토스 토큰 무효` | 다른 프로세스가 토큰 재발급 | 프로세스가 하나인지 확인. `state/toss_token.json` 삭제 후 재기동 |
-| `daily-loss-limit` | 당일 -5% | 그날은 매수 정지. 익일 자동 해제 |
+| `daily-loss-limit` | 당일 -4% | 그날은 매수 정지. 익일 자동 해제 |
+| `계좌 Kill Switch 발동` | 일손실 -4% · MDD -12% · 5분 중복 주문 · API 3연속 오류 · 장부 불일치 | 신규 주문(매수·매도) 전면 정지. `reason`·`detail` 확인 → 원인 해결 → 대시보드에서 해제 |
+| `비정상 급락 가드` | 고점 대비 -3×ATR(20)% 초과 폭락 | 그 종목은 당일 신규 매수 제외(보유 중이면 청산 규칙은 정상 작동) |
+| `이상 틱 가드 발동` | 매도 직전 ±10% 급변 + 보조 시세 불일치 | 가짜 손절 차단. 시세 소스 상태 확인 후 다음 사이클 재판정 |
+| `프리마켓 매도 신호 — 예약 큐` | 개장 전 청산 신호, 프리마켓 소수점 매도 미지원 | 09:30~09:32 ET 자동 집행. 집행 창을 놓치면 알림 후 수동 확인 |
+| `손절 후 당일 재진입 금지(EOD 쿨다운)` | 손절 종목 재진입 차단 | 정상 동작. 다음 거래일 자동 해제 |
 
 ## 2-1. 웹 대시보드 (`--web`)
 
@@ -50,7 +56,7 @@ python -m alpha_shield --web --port 8090 --web-refresh 30
 | 백그라운드 시작 · paper | 내장 모의 계좌로 체결까지 시뮬레이션 | `state/alpha_shield.db` 의 `paper_state` 에 이어서 저장 |
 | 1회 즉시 실행 | 현재 모드로 사이클 1회 | 장 마감이면 `skipped` 만 남음 |
 | 정지 | 루프 종료(진행 중 사이클은 끝까지) | — |
-| 킬스위치 ON/OFF | `state/halt.flag` 생성/삭제 | ON 이면 신규 매수만 멈추고 청산은 계속 |
+| 킬스위치 ON/OFF | `state/halt.flag` 생성/삭제 (+ OFF 는 계좌 Kill Switch 도 해제) | ON 이면 신규 매수만 멈추고 청산은 계속 |
 | 실주문 전환 | live 루프 시작 | `LIVE_ORDERS=true` + `state/ARMED` + 토스 키가 모두 있어야 활성화. 웹은 ARMED 를 만들지 않음 |
 
 - 화면은 10초마다 `/api/status` 를 다시 읽습니다. 시세 스냅샷은 서버가 `--web-refresh`(기본 60초) 주기로 백그라운드에서 갱신하므로,
@@ -106,6 +112,7 @@ sudo systemctl status alpha-shield
 ## 8. 변경 금지 권장
 
 - `config/strategy.yaml` 의 수치: 백테스트 기준값이 무효가 됩니다.
-- `capital.slots`: v3.2 는 2슬롯 고정(설정 검증에서 거부).
+- `capital.slots`: v3.3 은 2슬롯 고정(설정 검증에서 거부).
+- `capital.tiers`: 마지막 구간은 `max_equity_usd: null` 이어야 하고, 자산 오름차순이어야 합니다(설정 검증).
 - `entry.signal_ttl_seconds`: 900초 고정(설정 검증에서 거부).
 - `add.max_adds`: 1회 고정(설정 검증에서 거부).

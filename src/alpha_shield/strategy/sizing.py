@@ -1,4 +1,13 @@
-"""자금·슬롯 사이징 — 2슬롯 고정, 현금 버퍼, 최소 주문, 종목 상한."""
+"""자금·슬롯 사이징 — 2슬롯 고정, 3단 자산 구간, 현금 버퍼, 최소 주문, 종목 상한.
+
+v3.3 `권장안 A`(기본):
+  - 자산 < $400          : 1회 진입 $75 / 종목 상한 $150
+  - $400 ~ $500 미만     : $85 / $170
+  - $500 이상            : $120 / $240
+  - 현금 안전 버퍼 = max(자산 x 15%, $55) 상시 보존, $10 미만 주문 금지
+`대안 B`(strategy.yaml `capital.plan: B`)는 $500 미만에서 $85 / $170 을 유지하고,
+두 번째 종목 물타기를 가용현금(버퍼 차감) 안에서 부분 집행한다.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +35,10 @@ def cash_buffer(equity: Decimal, capital: CapitalConfig) -> Decimal:
 
 
 def spendable_cash(equity: Decimal, cash: Decimal, capital: CapitalConfig) -> Decimal:
-    """현금 안전 버퍼를 뺀, 주문에 쓸 수 있는 금액."""
+    """현금 안전 버퍼를 뺀, 주문에 쓸 수 있는 금액.
+
+    현금 계좌에서는 미결제 매도대금(T+1)을 뺀 '결제 완료 현금'을 넘긴다(GFV 방지).
+    """
     available = cash - cash_buffer(equity, capital)
     return available if available > ZERO else ZERO
 
@@ -67,7 +79,7 @@ def plan_add(
     capital: CapitalConfig,
     budget: Budget,
 ) -> Decimal | None:
-    """물타기 금액. 종목 노출 상한($170/$240) 안에서만."""
+    """물타기 금액. 종목 노출 상한($150/$170/$240) 안에서만, 버퍼·최소주문 준수."""
     tier = tier_for(equity, capital)
     exposure = position.qty * last_price
     room_by_cap = tier.symbol_cap - exposure
