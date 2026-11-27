@@ -288,14 +288,15 @@ function session(){
   if (HOLIDAYS.has(p.ymd)) return {label:"휴장일", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin:16*60, early:false};
   const early = EARLY[p.ymd];
   const closeMin = early ? (parseInt(early.slice(0,2),10)*60 + parseInt(early.slice(3),10)) : 16*60;
-  const fracMin = closeMin - 60;
+  // v3.3: 정규장은 종료 1시간 전이 소수점 마감, 조기폐장일은 종료 시각(13:00)까지
+  const fracMin = early ? closeMin : closeMin - 60;
   const entryStart = 9*60+45, entryEnd = fracMin - 15;
   const m = p.minutes;
   if (m < 9*60+30) return {label:"개장 전", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin, early:!!early};
   if (m >= closeMin) return {label:"장 마감", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin, early:!!early};
   if (m < entryStart) return {label:"개장 유예 (매수 금지)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early};
   if (m < entryEnd) return {label:"정규장 · 매수 가능", open:true, entry:true, sell:true, state:"ok", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin};
-  if (m >= fracMin-10 && m < fracMin-2) return {label:"선제 청산 창 (14:50~14:58 ET)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin, preemptive:true};
+  if (m >= fracMin-10 && m < fracMin-2) return {label:"선제 청산 창 ("+hhmm(fracMin-10)+"~"+hhmm(fracMin-2)+" ET)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin, preemptive:true};
   if (m < fracMin) return {label:"마감 유예 (청산만)", open:true, entry:false, sell:true, state:"warn", ymd:p.ymd, now:p, closeMin, early:!!early, fracMin:fracMin};
   if (m < closeMin) return {label:"소수점 마감 (청산 불가)", open:true, entry:false, sell:false, state:"bad", ymd:p.ymd, now:p, closeMin, early:!!early};
   return {label:"장 마감", open:false, entry:false, sell:false, state:"idle", ymd:p.ymd, now:p, closeMin, early:!!early};
@@ -806,7 +807,7 @@ function renderGuards(){
   const s = session();
   box.appendChild(guardCard("② 세션 (주문 가능 창)", s.state==="ok"?"pass":(s.state==="bad"?"block":"idle"),
     s.label, s.open ? (s.early ? "조기폐장 "+hhmm(s.closeMin) : "정규장 16:00 마감") : "다음 개장 09:30 ET",
-    "매수 창 09:45~"+hhmm(s.closeMin-75)+" ET · 소수점 마감 "+hhmm(s.closeMin-60)+" ET"));
+    "매수 창 09:45~"+hhmm((s.early?s.closeMin:s.closeMin-60)-15)+" ET · 소수점 마감 "+hhmm(s.early?s.closeMin:s.closeMin-60)+" ET · 선제 청산 "+hhmm((s.early?s.closeMin:s.closeMin-60)-10)+"~"+hhmm((s.early?s.closeMin:s.closeMin-60)-2)+" ET"));
 
   const mt = macroToday();
   box.appendChild(guardCard("③ 거시 (FOMC·CPI·NFP)", mt.length?"boost":"pass",
@@ -874,7 +875,7 @@ function renderUniverse(){
   });
   const stamp = MKT.updated ? hhmmss(MKT.updated) : "–";
   const missingHist = SYMS.filter(s=>!MKT.hist[s]).length;
-  $("universeFoot").textContent = "기준 "+stamp+" · 일봉 미수신 "+missingHist+"종목 · 점수 = 알파 가중치 × (|낙폭| ÷ 진입 임계) · "+
+  $("universeFoot").textContent = "기준 "+stamp+" · 일봉 미수신 "+missingHist+"종목 · 점수 = 알파 가중치 × min(|낙폭| ÷ 진입 임계, 2.5) · "+
     "HOD는 1분봉(중앙값×1.15 초과 봉은 open/close 로 대체), 1분봉이 없으면 당일 고가를 씁니다.";
 }
 

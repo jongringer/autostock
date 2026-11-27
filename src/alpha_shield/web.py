@@ -765,10 +765,7 @@ class WebApp:
             "session": {
                 "status": "pass" if session.entry_allowed else "block",
                 "label": session_label,
-                "detail": (
-                    f"매수 창 09:45~14:45 ET · 소수점 마감 15:00 ET"
-                    + (" · 조기폐장 13:00" if session.window is not None and session.window.early_close else "")
-                ),
+                "detail": self._session_detail(session),
             },
             "events": {
                 "status": "block" if symbols_with("earnings") else "armed",
@@ -807,6 +804,25 @@ class WebApp:
                 else {"active": False, "reason": "", "detail": {}}
             ),
         }
+
+    def _session_detail(self, session) -> str:
+        """매수 창·소수점 마감·선제 청산 창을 세션(조기폐장 포함)에 맞춰 표시."""
+        window = session.window
+        cfg = self.guards.session
+        if window is None:
+            return "휴장일 — 주문 창 없음"
+        entry_start, entry_end = window.entry_window(
+            cfg.entry_open_delay_min, cfg.entry_close_buffer_min, cfg.fractional_close_buffer_min
+        )
+        frac = window.fractional_deadline(cfg.fractional_close_buffer_min)
+        pre_start, pre_end = window.preemptive_window(
+            cfg.fractional_close_buffer_min, cfg.preemptive_start_min, cfg.preemptive_end_min
+        )
+        note = " · 조기폐장 13:00" if window.early_close else ""
+        return (
+            f"매수 창 {entry_start:%H:%M}~{entry_end:%H:%M} ET · 소수점 마감 {frac:%H:%M} ET"
+            f" · 선제 청산 {pre_start:%H:%M}~{pre_end:%H:%M} ET{note}"
+        )
 
     def _next_macro(self, today: date) -> str | None:
         if self._macro is None:
