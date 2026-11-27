@@ -45,7 +45,9 @@
 ```
 config/                     전략·가드·거시/시장 캘린더 (사람이 읽고 고치는 값)
 src/alpha_shield/
-  cli.py                    진입점 (--mode, --once, --loop, --check ...)
+  cli.py                    진입점 (--mode, --once, --loop, --check, --web ...)
+  web.py                    봇 내장 웹 대시보드 (http.server, /api/status·/api/control·/api/run-once)
+  webui.py                  대시보드 화면 (한글 반응형 HTML/CSS/JS, 외부 CDN 없음)
   clock.py                  America/New_York 기준, 로그는 KST 병기
   config.py                 YAML/환경변수 로딩·검증 (fail-fast)
   numeric.py                Decimal 강제 · 소수 2/6자리 규칙
@@ -83,7 +85,7 @@ src/alpha_shield/
   reporting/ledger.py       세무용 거래 원장 CSV
 tests/                      184개 unittest (전략·가드·영속화·이중잠금·모의 브로커·live 스택)
 deploy/                     systemd 유닛 · watchdog · healthcheck
-docs/                       전략 스펙 · 운영 런북
+docs/                       전략 스펙 · 운영 런북 + GitHub Pages 정적 웹앱(index.html)
 ```
 
 **의존성 원칙**: 전략·가드·원장은 브로커를 모릅니다. `Broker` / `MarketData` 인터페이스만 의존하므로, 증권사나 데이터 소스를 바꿔도 전략 코드는 그대로입니다.
@@ -143,12 +145,78 @@ python -m alpha_shield --mode live --loop
 python -m alpha_shield --status                       # 포지션·최근 주문·테이블 현황
 python -m alpha_shield --export-ledger 2026-12        # 월별 거래 원장 CSV
 python -m alpha_shield --reconcile                    # 브로커 ↔ 로컬 대조
+
+# 5) 웹 대시보드 (로컬 전용, 표준 라이브러리만 사용)
+python -m alpha_shield --web                          # http://127.0.0.1:8080
+python -m alpha_shield --web --port 8090              # 포트 변경
+python -m alpha_shield --web --host 0.0.0.0           # 같은 공유기 안에서만 열 때 (권장하지 않음)
+python -m alpha_shield --web --web-refresh 30         # 시세 갱신 주기(초)
 ```
 
 - `--interval 300` 으로 사이클 간격을 바꿀 수 있습니다. **5분(300초)이 스펙 값**입니다.
 - 모드는 CLI 인자가 `.env` 보다 우선합니다.
 - 로그: `logs/alpha-shield.log`(회전), `logs/alerts.jsonl`, `logs/decisions-YYYY-MM-DD.jsonl`(사이클별 판정 근거).
 - 상태: `state/alpha_shield.db` (WAL), `state/toss_token.json`(0600).
+
+---
+
+## 5-1. 봇 내장 웹 대시보드 (`--web`)
+
+`python3 -m alpha_shield --web` 은 **표준 라이브러리 `http.server`** 만 쓰는 로컬 대시보드입니다.
+기본 주소는 `http://127.0.0.1:8080` 이고, `--host`/`--port`/`--web-refresh` 로 바꿀 수 있습니다.
+
+| 화면 | 내용 |
+|---|---|
+| 상단 요약 | 실행 모드(stopped/dry-run/paper/live), 총자산·현금·안전 버퍼 `max(15%, $55)`, 2슬롯 사용 현황, 당일 손익, 실주문 잠금 상태 |
+| 운용 제어 | 백그라운드 루프 **시작(dry-run/paper)**, **1회 즉시 실행**, **정지**, **킬스위치 ON/OFF** |
+| 5중 방어막 | NQ 선물 등락률·VIX·세션 창·실적/8-K/뉴스/거시 가드·데이터 안전장치 상태 |
+| 8종목 판정표 | 현재가, 고점 대비 낙폭, ATR(20)·진입 임계, RSI(2), SMA200, 슬롯 점수, 진입/대기 사유 |
+| 보유 슬롯 | 평단·현재 수익률·VIX 목표 익절가·손절가·보유 거래일 |
+| 로그 | 최근 주문 25건, 알림 15건 |
+
+**API**
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET | `/` | 대시보드 화면 (CSRF 토큰 내장) |
+| GET | `/api/status` | 요약·방어막·판정표·보유·주문·알림 JSON |
+| POST | `/api/control` | `{"action":"start","mode":"dry-run"\|"paper"\|"live"}`, `{"action":"stop"}`, `{"action":"halt-on"\|"halt-off"}` |
+| POST | `/api/run-once` | `{"mode":"paper"}` — 사이클 1회 즉시 실행 |
+| GET | `/api/health` | `{"ok":true,"version":...}` |
+
+**안전**
+- 기본 바인딩은 `127.0.0.1` 입니다. `--host 0.0.0.0` 은 본인 책임 하에만 쓰세요.
+- POST 는 `X-Alpha-Token` 헤더(화면에 자동 내장)와 로컬 Origin 검사를 통과해야 합니다.
+- **live 전환 버튼은 `LIVE_ORDERS=true` 와 `state/ARMED` 가 모두 있을 때만 활성화**되고, 그마저도 토스 키가 없으면 거부됩니다.
+  웹은 `state/ARMED` 를 대신 만들어 주지 않습니다.
+- SQLite 연결은 요청·엔진마다 따로 열어 스레드 간 공유를 피합니다.
+
+## 5-2. GitHub Pages 정적 웹앱 (`docs/index.html`)
+
+`docs/` 는 GitHub Pages 루트로도 쓸 수 있습니다. 기존 문서(`SPEC-v3.2.md`, `RUNBOOK.md`)는 그대로 두고
+`docs/index.html` + `docs/manifest.webmanifest` + `docs/icon.svg` 만 추가했습니다.
+
+- **브라우저 단독 실행**: Yahoo Finance 공개 차트 API(무료·비공식)를 공개 CORS 프록시 체인으로 읽어
+  8종목 + `NQ=F` + `^VIX` 의 시세·일봉(2년)·1분봉을 받고, **ATR(20)·RSI(2)·SMA(200)·장중 고점(HOD)·낙폭·슬롯 점수·VIX 목표 익절률**을
+  브라우저에서 직접 계산합니다. 계산식은 `src/alpha_shield/indicators.py` · `strategy/` 와 같습니다.
+- **모의매매 시뮬레이터**: 시작 자금 **$380**, **2슬롯 고정**, 자동/수동 매수·물타기(−1.5% & RSI≤35 1회)·
+  익절(VIX<18 → +8%, 아니면 +5%)·손절(−5% / 물타기 −3.5%)·시간청산(10거래일/14일)·15분 쿨다운.
+  체결 가정은 슬리피지 5bp·수수료 10bp 이고, 계좌·체결·로그는 `localStorage` 에 남습니다.
+- **가드**: 시장(NQ/VIX)·세션(개장 15분·마감 15분·소수점 마감)·거시(FOMC/CPI/NFP 2026 캘린더, 발표일 낙폭 +0.5%p)·
+  데이터(수신 여부)를 표시합니다. 실적·8-K·뉴스 가드는 브라우저에서 안전하게 부를 수 없어 **봇 대시보드에서 확인**하도록 명시했습니다.
+- **PWA**: `manifest.webmanifest` + 아이콘 + `apple-mobile-web-app-*` 메타태그. 홈 화면에 추가하면 앱처럼 열립니다.
+- **실주문 없음**: 이 페이지에는 주문 권한도, API 키도, 실계좌 연동도 없습니다.
+
+공개 주소(저장소 Settings → Pages 에서 `main` / `/docs` 를 선택하면): `https://jongringer.github.io/autostock/`
+
+> Yahoo 는 CORS 헤더를 주지 않아 공개 프록시(`codetabs` → `allorigins` → `cors.lol` → `r.jina.ai` → 직접)를 순서대로 시도하고,
+> 성공한 경로를 기억합니다. 프록시가 모두 막히면 값이 비거나 지연될 수 있습니다.
+
+## 5-3. 검증
+
+- 단위 테스트: **201개 전부 PASS** (기존 184 + 웹 API 17).
+- 실제 브라우저(Playwright)로 대시보드와 `docs/index.html` 을 열어 레이아웃·버튼·모의 체결을 확인했습니다.
+  스크린샷: `downloads/autostock-web-dashboard.png`, `downloads/autostock-pages-preview.png`
 
 ## 6. 토스증권 Open API 실전 준비
 
@@ -181,7 +249,7 @@ PYTHONPATH=src:tests python3 -m unittest discover -s tests -p "test_*.py" -v
 pip install pytest && PYTHONPATH=src pytest -q tests
 ```
 
-**184개 테스트 / 전부 PASS** (2026-11-27 기준). 범위:
+**201개 테스트 / 전부 PASS** (2026-11-27 기준). 범위:
 
 - 지표: Wilder ATR/RSI 고정값, SMA, HOD 이상치 필터
 - 자금: $499.99/$500.00/$500.01 경계, 버퍼 교차점, 최소주문, 종목 상한
@@ -192,6 +260,7 @@ pip install pytest && PYTHONPATH=src pytest -q tests
 - 토스 클라이언트: client_credentials 폼, 토큰 파일 공유/0600/만료 재발급, `token-revoked` 1회 재시도, 캔들 페이지네이션
 - 영속화: Decimal 왕복, 쿨다운, 일일 상태, 원장 CSV
 - 엔진: 진입→보유→익절/손절/시간청산, 매도 우선, 물타기, 가드/킬스위치/불일치 차단, 15:00 이후 청산 불가, dry-run 무주문
+- 웹 대시보드: `/api/status` 응답 구조, 토큰·Origin 검사, 시작/정지/1회 실행/킬스위치 토글, live 이중 잠금 거부, 시세 실패 시 degrade, CLI `--web` 옵션
 
 네트워크는 테스트에 쓰지 않습니다. 토스·Yahoo·SEC·Nasdaq 응답은 모두 가짜 전송 계층으로 대체합니다.
 

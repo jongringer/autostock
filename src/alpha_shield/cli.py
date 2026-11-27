@@ -13,9 +13,9 @@ from pathlib import Path
 from . import __version__
 from .broker import DryRunBroker, PaperBroker, TossBroker
 from .broker.paper import RepoPaperStore
-from .calendar import StaticUsCalendar, TossUsCalendar
+from .calendar import StaticUsCalendar, TossUsCalendar, build_calendar
 from .clock import SystemClock
-from .config import ConfigError, Settings, load_all
+from .config import ConfigError, Settings, load_all, load_settings
 from .engine.alerts import Alerter, DecisionLog
 from .engine.loop import Engine
 from .marketdata import (
@@ -55,6 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status", action="store_true", help="현재 포지션·주문·일일 상태 출력")
     parser.add_argument("--export-ledger", metavar="YYYY-MM", nargs="?", const="", help="거래 원장 CSV 내보내기")
     parser.add_argument("--reconcile", action="store_true", help="브로커 보유와 로컬 원장을 즉시 대조")
+    parser.add_argument("--web", action="store_true", help="봇 내장 웹 대시보드 실행 (기본 http://127.0.0.1:8080)")
+    parser.add_argument("--host", default="127.0.0.1", help="웹 대시보드 바인딩 주소 (기본 127.0.0.1 — 로컬 전용)")
+    parser.add_argument("--port", type=int, default=8080, help="웹 대시보드 포트 (기본 8080)")
+    parser.add_argument("--web-refresh", type=int, default=60, help="웹 대시보드 시세 갱신 주기(초, 기본 60)")
     return parser
 
 
@@ -236,6 +240,35 @@ def main(argv: list[str] | None = None) -> int:
             month = args.export_ledger or None
             path = export_ledger(repo, settings.root / "ledger", month)
             print(f"원장 내보내기 완료: {path}")
+            return 0
+
+        if args.web:
+            from .web import WebApp, serve
+
+            transport = RetryingTransport(UrllibTransport())
+            yahoo = YahooMarketData(transport)
+            calendar = build_calendar(settings.normalized_mode, None, settings.root)
+
+            def repo_factory() -> Repo:
+                # 요청·엔진마다 별도 SQLite 연결 (스레드 간 공유 금지)
+                return Repo(Database(settings.db_path))
+
+            def engine_factory(mode: str) -> Engine:
+                scoped = load_settings(root=settings.root, mode=mode, data_dir=str(settings.data_dir))
+                return build_engine(scoped, strategy, guards, repo_factory(), settings.root)
+
+            app = WebApp(
+                settings=settings,
+                strategy=strategy,
+                guards=guards,
+                repo_factory=repo_factory,
+                market_data=yahoo,
+                engine_factory=engine_factory,
+                calendar=calendar,
+                interval=args.interval,
+                refresh_seconds=float(args.web_refresh),
+            )
+            serve(app, args.host, args.port)
             return 0
 
         engine = build_engine(settings, strategy, guards, repo, settings.root)

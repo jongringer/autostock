@@ -1,0 +1,16 @@
+{
+  "name": "ALPHA SHIELD v3.2 · 실시간 전략·모의매매",
+  "short_name": "ALPHA SHIELD",
+  "description": "미국장 2슬롯 소수점 전략의 실시간 판정표와 브라우저 모의매매 시뮬레이터 (실주문 없음).",
+  "lang": "ko",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0a1220",
+  "theme_color": "#0a1220",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
